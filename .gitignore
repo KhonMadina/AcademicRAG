@@ -1,0 +1,247 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Python
+__pycache__/
+*.pyc
+
+# Local Data
+/index_store
+/shared_uploads
+chat_history.db
+*.pkl
+
+# Backend generated files
+backend/shared_uploads/
+
+# Vector DB artefacts
+lancedb/
+index_store/overviews/
+
+# Logs and runtime output
+logs/
+*.log
+
+# SQLite or other database files
+*.db
+#backend/*.db
+# backend/chat_history.db
+backend/chroma_db/
+backend/chroma_db/**
+
+# Document and user-uploaded files (PDFs, images, etc.)
+rag_system/documents/
+*.pdf
+
+# Ensure docker.env remains tracked
+!docker.env
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Logs
+logs/
+*.log
+
+# Build / Dist
+dist/
+build/
+out/
+
+# Databases / Storage
+*.db
+*.sqlite
+*.sqlite3
+/lancedb/
+/shared_uploads/
+/index_store/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# npm package artifacts / cache
+*.tgz
+.npm/
+.npm-cache/
+
+# ------------------------------
+# Dependencies / package managers
+# ------------------------------
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches/
+!.yarn/plugins/
+!.yarn/releases/
+!.yarn/versions/
+
+# npm / pnpm / yarn logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+
+# package artifacts / caches
+*.tgz
+.npm/
+.npm-cache/
+
+# ------------------------------
+# Next.js / frontend build output
+# ------------------------------
+.next/
+out/
+dist/
+build/
+coverage/
+
+# ------------------------------
+# Environment / secrets
+# ------------------------------
+.env
+.env.*
+!.env.example
+!docker.env
+
+# ------------------------------
+# Python
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ------------------------------
+# Local app data / vector DB / uploads
+# ------------------------------
+# common DB files (but allow backend/chat_data.db below)
+*.db
+*.sqlite
+*.sqlite3
+
+# project folders
+lancedb/
+index_store/
+shared_uploads/
+logs/
+
+# backend-specific generated folders
+backend/chroma_db/
+backend/shared_uploads/
+
+# RAG documents (optional; remove if you want PDFs committed)
+rag_system/documents/
+*.pdf
+
+# misc data
+*.pkl
+
+# ------------------------------
+# OS / editor
+# ------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.pem
+
+# ------------------------------
+# Allowlist (MUST be at end to win)
+# ------------------------------
+
+# Virtual environments (ignore anywhere in repo)
+.venv/
+.venv/**
+**/.venv/
+**/.venv/**
+
+
+backend/chat_data.db
+chat_data.db

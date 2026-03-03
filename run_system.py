@@ -199,7 +199,7 @@ class ServiceManager:
             missing_tools.append('python')
         
         # Check Node.js (optional)
-        if not self._command_exists('npm'):
+        if not self._command_exists('npm.cmd'):
             self.logger.warning("  npm not found - frontend will be disabled")
             self.services['frontend'].required = False
         

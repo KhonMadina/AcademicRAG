@@ -70,7 +70,7 @@ export function IndexForm({ onClose, onIndexed }: Props) {
   };
 
   return (
-    <div className="relative bg-white/50 rounded-xl p-6 w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth space-y-6 border border-black/10 shadow-2xl">
+    <div className="relative bg-white/80 rounded-xl p-6 w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth space-y-6 border border-black/20 shadow-2xl">
       {/* Loading overlay */}
       {loading && (
         <div className="absolute inset-0 backdrop-blur-sm flex flex-col items-center justify-center rounded-xl z-20">
@@ -90,19 +90,73 @@ export function IndexForm({ onClose, onIndexed }: Props) {
       {/* Upload & defaults */}
       <div className="space-y-4">
         <div>
-          <label className="block text-xs uppercase tracking-wide  mb-1">Attached files (PDF,.md,txt)</label>
+          <label htmlFor="file-upload" className="block text-xs uppercase tracking-wide  mb-1">Attached files (PDF,.md,txt)</label>
           <label
             htmlFor="file-upload"
-            className="flex flex-col items-center justify-center w-full h-32 border border-dashed border-black/20 rounded cursor-pointer hover:border-black/40 transition"
+            className="flex flex-col items-center justify-center w-full h-16 border border-dashed border-black/20 rounded cursor-pointer hover:border-black/40 transition"
             onDragOver={(e)=>e.preventDefault()}
-            onDrop={(e)=>{e.preventDefault(); if(e.dataTransfer.files) setFiles(e.dataTransfer.files)}}
+            onDrop={(e)=>{
+              e.preventDefault();
+              if (e.dataTransfer.files) {
+                const incoming = Array.from(e.dataTransfer.files);
+                const current = files ? Array.from(files) : [];
+                const combined = current.concat(incoming).slice(0, 4);
+                const dt = new DataTransfer();
+                combined.forEach(f => dt.items.add(f));
+                setFiles(dt.files);
+              }
+            }}
           >
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-2"><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="16"/></svg>
-            <span className="text-xs ">Drag & Drop documents here or click to browse</span>
-            <input id="file-upload" type="file" accept="application/pdf,.docx,.doc,.html,.htm,.md,.txt" multiple className="hidden" onChange={(e)=>setFiles(e.target.files)} />
+            <svg width="32" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1." strokeLinecap="round" strokeLinejoin="round" className="mb-2"><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="16"/></svg>
+            <span className="text-xs mb-2">Drag & Drop documents here or click to browse</span>
+            <input
+              id="file-upload"
+              type="file"
+              accept="application/pdf,.docx,.doc,.html,.htm,.md,.txt"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) {
+                  const incoming = Array.from(e.target.files);
+                  const current = files ? Array.from(files) : [];
+                  const combined = current.concat(incoming).slice(0, 4);
+                  const dt = new DataTransfer();
+                  combined.forEach(f => dt.items.add(f));
+                  setFiles(dt.files);
+                }
+              }}
+              disabled={!!files && files.length >= 4}
+            />
           </label>
-          {files && <p className="mt-1 text-xs text-green-400">{files.length} file(s) selected</p>}
-        </div>
+          {files && (
+            <div className="mt-1 text-xs">
+              <p className="text-green-400">{files.length} file(s) selected</p>
+              {files.length >= 4 && (
+                <p className="text-red-500">Maximum 4 files allowed.</p>
+              )}
+              <ul className="mt-1 space-y-1">
+                {Array.from(files).map((file, idx) => (
+                  <li key={file.name + idx} className="flex items-center justify-between bg-black/5 rounded px-2 py-1">
+                    <span className="truncate max-w-[70%]">{file.name}</span>
+                    <button
+                      type="button"
+                      className="ml-2 px-2 py-1 text-xs bg-red-500/80 text-white rounded hover:bg-red-700"
+                      onClick={() => {
+                        const newFiles = Array.from(files).filter((_, i) => i !== idx);
+                        if (newFiles.length === 0) setFiles(null);
+                        else {
+                          const dt = new DataTransfer();
+                          newFiles.forEach(f => dt.items.add(f));
+                          setFiles(dt.files);
+                        }
+                      }}
+                    >Remove</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+            </div>
 
         {/* Retrieval mode & Late-chunk toggle */}
         <div>
@@ -207,7 +261,7 @@ export function IndexForm({ onClose, onIndexed }: Props) {
       </AccordionGroup>
 
       <div className="flex justify-end gap-3 pt-4 border-t border-black/10">
-        <button onClick={onClose} className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm hover:cursor-pointer text-white">
+        <button  disabled={loading} onClick={onClose} className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm hover:cursor-pointer text-white">
           Cancel
         </button>
         <button

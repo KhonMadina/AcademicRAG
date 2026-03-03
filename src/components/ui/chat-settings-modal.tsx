@@ -161,8 +161,8 @@ export function ChatSettingsModal({ options, onClose }: Props) {
   );
 
   return (
-    <div className="fixed inset-0 backdrop-blur-lg flex items-center justify-center z-50 p-4">
-      <div className="rounded-xl w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth p-6 space-y-6 border border-black/10 shadow-2xl">
+    <div className="fixed  inset-0 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="rounded-xl bg-white/80 backdrop-blur w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth p-6 space-y-6 border border-black/20 shadow-2xl">
         <h2 className="text-lg font-semibold mb-6">Chat Settings</h2>
 
         <div className="space-y-6">

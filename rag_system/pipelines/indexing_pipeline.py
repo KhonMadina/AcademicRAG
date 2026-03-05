@@ -218,6 +218,29 @@ class IndexingPipeline:
             if hasattr(self, 'contextual_enricher') and enricher_enabled:
                 with timer("Contextual Enrichment"):
                     window_size = enricher_config.get("window_size", 1)
+
+                    # Auto-tune window size for large chunks to reduce LLM context overflow.
+                    auto_window_enabled = enricher_config.get("auto_window", True)
+                    adjusted_window_size = window_size
+                    if auto_window_enabled and all_chunks:
+                        sample_count = min(50, len(all_chunks))
+                        sample_chunks = all_chunks[:sample_count]
+                        avg_chars = sum(len(c.get("text", "")) for c in sample_chunks) / max(1, sample_count)
+
+                        if avg_chars >= 3200:
+                            adjusted_window_size = min(adjusted_window_size, 1)
+                        elif avg_chars >= 2200:
+                            adjusted_window_size = min(adjusted_window_size, 2)
+                        elif avg_chars >= 1400:
+                            adjusted_window_size = min(adjusted_window_size, 3)
+
+                        if adjusted_window_size != window_size:
+                            print(
+                                f"   Auto-window applied: avg chunk length={avg_chars:.0f} chars, "
+                                f"window_size {window_size} -> {adjusted_window_size}"
+                            )
+
+                    window_size = adjusted_window_size
                     print(f"\n CONTEXTUAL ENRICHMENT ACTIVE!")
                     print(f"   Window size: {window_size}")
                     print(f"   Model: {self.contextual_enricher.llm_model}")

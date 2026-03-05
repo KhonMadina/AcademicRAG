@@ -9,7 +9,7 @@ import { AttachedFile } from "@/lib/types"
 import { useEffect, useState, forwardRef, useImperativeHandle, useCallback } from "react"
 import { normalizeStreamingToken } from "@/utils/textNormalization"
 import { Button } from "./button"
-import type { Step } from '@/lib/api'
+import type { IndexSummary, Step } from '@/lib/api'
 import { ChatSettingsModal } from '@/components/ui/chat-settings-modal'
 import { IndexForm } from '@/components/IndexForm'
 import SessionIndexInfo from '@/components/SessionIndexInfo'
@@ -28,8 +28,52 @@ export interface SessionChatRef {
   currentSession: ChatSession | null
 }
 
+type StepContainer = { steps: Step[] }
+type SubQueryDetail = {
+  question: string
+  answer: string
+  source_documents: unknown[]
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isStepContainer = (content: ChatMessage['content']): content is StepContainer =>
+  isObjectRecord(content) && Array.isArray(content.steps)
+
+const toSubQueryDetail = (value: unknown): SubQueryDetail | null => {
+  if (!isObjectRecord(value)) return null
+  const question = typeof value.question === 'string' ? value.question : ''
+  const answer = typeof value.answer === 'string' ? value.answer : ''
+  const sourceDocuments = Array.isArray(value.source_documents) ? value.source_documents : []
+  if (!question) return null
+  return { question, answer, source_documents: sourceDocuments }
+}
+
 // Helper to shorten long titles
 const truncate = (str: string, n: number = 18) => str.length > n ? str.slice(0, n) + '' : str;
+
+const getIndexIdentity = (index: IndexSummary | undefined) => {
+  if (!index) {
+    return { id: null as string | null, name: null as string | null };
+  }
+
+  const id = typeof index.index_id === 'string'
+    ? index.index_id
+    : typeof index.id === 'string'
+      ? index.id
+      : null;
+
+  const name = typeof index.name === 'string'
+    ? index.name
+    : typeof index.title === 'string'
+      ? index.title
+      : id
+        ? id.slice(0, 8)
+        : null;
+
+  return { id, name };
+};
 
 export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({ 
   sessionId,
@@ -87,10 +131,11 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
       try {
         const idxResp = await apiService.getSessionIndexes(id)
         if (idxResp.indexes && idxResp.indexes.length > 0) {
-          const lastIdxObj = idxResp.indexes[idxResp.indexes.length - 1] as any
-          const idxId = (lastIdxObj.index_id ?? lastIdxObj.id) as string
-          setCurrentIndexId(idxId ?? null)
-          setCurrentIndexName(lastIdxObj.name ?? lastIdxObj.title ?? idxId.slice(0,8))
+          const { id: resolvedIndexId, name: resolvedIndexName } = getIndexIdentity(
+            idxResp.indexes[idxResp.indexes.length - 1],
+          )
+          setCurrentIndexId(resolvedIndexId)
+          setCurrentIndexName(resolvedIndexName)
         }
       } catch {}
     } catch (error) {
@@ -200,10 +245,12 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
         try {
           const idxResp = await apiService.getSessionIndexes(activeSessionId as string);
           if (idxResp.indexes && idxResp.indexes.length > 0) {
-            const lastIdxObj = idxResp.indexes[idxResp.indexes.length - 1] as any;
-            idxId = (lastIdxObj.index_id ?? lastIdxObj.id) as string;
-            setCurrentIndexId(idxId ?? null);
-            setCurrentIndexName(lastIdxObj.name ?? lastIdxObj.title ?? idxId.slice(0,8));
+            const { id: resolvedIndexId, name: resolvedIndexName } = getIndexIdentity(
+              idxResp.indexes[idxResp.indexes.length - 1],
+            );
+            idxId = resolvedIndexId;
+            setCurrentIndexId(resolvedIndexId);
+            setCurrentIndexName(resolvedIndexName);
           }
         } catch {}
       }
@@ -257,7 +304,8 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
             console.log('STREAM EVENT:', evt.type, evt.data); // Debug log for SSE events
             setMessages(prev => prev.map(m => {
               if (m.id !== placeholder.id) return m;
-              const steps = [...(m.content as any).steps];
+              if (!isStepContainer(m.content)) return m;
+              const steps = [...m.content.steps];
               if (evt.type === 'analyze') {
                 steps[0].status = 'active';
                 steps[0].details = 'Analyzing your question...';
@@ -328,12 +376,19 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
               }
               if (evt.type === 'sub_query_result') {
                 steps[5].status = 'active';
-                const existing = Array.isArray(steps[5].details) ? steps[5].details : [];
-                if (!existing.some((d: any) => d.question === evt.data.query)) {
+                const existing = Array.isArray(steps[5].details)
+                  ? (steps[5].details as unknown[])
+                      .map(toSubQueryDetail)
+                      .filter((item): item is SubQueryDetail => item !== null)
+                  : [];
+                const query = typeof evt.data?.query === 'string' ? evt.data.query : '';
+                const answer = typeof evt.data?.answer === 'string' ? evt.data.answer : '';
+                const sourceDocuments = Array.isArray(evt.data?.source_documents) ? evt.data.source_documents : [];
+                if (query && !existing.some((detail) => detail.question === query)) {
                   steps[5].details = [...existing, {
-                    question: evt.data.query,
-                    answer: evt.data.answer,
-                    source_documents: evt.data.source_documents || []
+                    question: query,
+                    answer,
+                    source_documents: sourceDocuments,
                   }];
                 } else {
                   steps[5].details = existing; // no change if duplicate
@@ -359,12 +414,13 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
                 }
                 let current = '' as string;
                 const detHolder = steps[finalIdx].details;
-                if (detHolder && typeof detHolder === 'object' && !Array.isArray(detHolder)) {
-                  current = (detHolder as any).answer || '';
+                if (isObjectRecord(detHolder)) {
+                  const answer = detHolder.answer;
+                  current = typeof answer === 'string' ? answer : '';
                 } else if (typeof detHolder === 'string') {
                   current = detHolder;
                 }
-                const tok: string = (evt.data.text || '') as string;
+                const tok = typeof evt.data?.text === 'string' ? evt.data.text : '';
                 if (!tok.trim()) {
                   return m; // skip empty/whitespace-only chunks
                 }
@@ -385,15 +441,22 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
                 return { ...m, content: { steps } };
               }
               if (evt.type === 'sub_query_token') {
-                const idx = evt.data.index as number;
-                const tok: string = evt.data.text || '';
+                const rawIdx = evt.data?.index;
+                const idx = typeof rawIdx === 'number' ? rawIdx : Number(rawIdx);
+                const tok = typeof evt.data?.text === 'string' ? evt.data.text : '';
+                if (!Number.isInteger(idx) || idx < 0) return m;
                 if (!tok.trim()) return m;
                 steps[5].status = 'active';
-                let detailsArr: any[] = Array.isArray(steps[5].details) ? steps[5].details as any[] : [];
+                const detailsArr: SubQueryDetail[] = Array.isArray(steps[5].details)
+                  ? (steps[5].details as unknown[])
+                      .map(toSubQueryDetail)
+                      .filter((item): item is SubQueryDetail => item !== null)
+                  : [];
                 while (detailsArr.length <= idx) {
-                  detailsArr.push({ question: evt.data.question || `Sub-query ${idx+1}`, answer: '' });
+                  const fallbackQuestion = typeof evt.data?.question === 'string' ? evt.data.question : `Sub-query ${idx + 1}`;
+                  detailsArr.push({ question: fallbackQuestion, answer: '', source_documents: [] });
                 }
-                const curAns: string = detailsArr[idx].answer || '';
+                const curAns = detailsArr[idx].answer || '';
                 if (!curAns.endsWith(tok)) {
                   let updatedAnswer = curAns + tok;
                   updatedAnswer = normalizeStreamingToken('', updatedAnswer);
@@ -410,11 +473,11 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
 
                 if (steps[finalIdx].key === 'direct') {
                   // Direct answer: details is plain string
-                  steps[finalIdx].details = evt.data.answer;
+                  steps[finalIdx].details = typeof evt.data?.answer === 'string' ? evt.data.answer : '';
                 } else {
                   steps[finalIdx].details = {
-                    answer: evt.data.answer,
-                    source_documents: evt.data.source_documents || []
+                    answer: typeof evt.data?.answer === 'string' ? evt.data.answer : '',
+                    source_documents: Array.isArray(evt.data?.source_documents) ? evt.data.source_documents : [],
                   };
                 }
 
@@ -468,6 +531,10 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
           forceRag: forceDocs,
           provencePrune,
         })
+      const responseWithExtras = response as typeof response & {
+        source_documents?: unknown[]
+        session?: ChatSession
+      }
       
       const aiMessage: ChatMessage = {
         id: response.ai_message_id || generateUUID(),
@@ -476,13 +543,13 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
         timestamp: new Date().toISOString(),
           metadata: { 
             message_type: 'sub_answer',
-            source_documents: (response as any).source_documents || [] 
+            source_documents: responseWithExtras.source_documents || [] 
           }
       }
       setMessages(prev => [...prev, aiMessage])
       
-        if ((response as any).session) {
-          const sess = (response as any).session as ChatSession
+        if (responseWithExtras.session) {
+          const sess = responseWithExtras.session
           setCurrentSession(sess)
           if (onSessionChange) onSessionChange(sess)
         }
@@ -532,7 +599,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
     currentSession
   }))
 
-  const handleAction = async (action: string, messageId: string, messageContent: string | Record<string, any>[] | { steps: Step[] }) => {
+  const handleAction = async (action: string, messageId: string, messageContent: string | Record<string, unknown>[] | { steps: Step[] }) => {
     console.log(`Action ${action} on message ${messageId}`)
     
     switch (action) {

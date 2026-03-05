@@ -55,7 +55,7 @@ export function ModelSelect({ value, onChange, type, className, placeholder }: P
 
   return (
     <select
-      className={`w-full px-3 py-2 bg-white/50 border border-white-600 text-black/70 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 focus:border-transparent hover:cursor-pointer ${className || ''}`}
+      className={`w-full px-2 py-2 bg-white/50 border border-white-600 text-black/70 rounded-sm text-xs focus:outline-none focus:ring-2 focus:ring-gray-200 focus:border-transparent hover:cursor-pointer ${className || ''}`}
       value={value || ''}
       onChange={(e) => onChange(e.target.value)}
     >

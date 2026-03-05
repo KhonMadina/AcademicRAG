@@ -21,6 +21,20 @@ class OllamaClient:
         image.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+    def _supports_chat_template_kwargs(self, model: str) -> bool:
+        """Best-effort check: only some families reliably support chat_template_kwargs."""
+        model_lc = (model or "").lower()
+        return any(name in model_lc for name in ("qwen", "deepseek"))
+
+    def _error_text(self, response: requests.Response | None) -> str:
+        if response is None:
+            return ""
+        try:
+            text = response.text or ""
+            return text[:500]
+        except Exception:
+            return ""
+
     def generate_embedding(self, model: str, text: str) -> List[float]:
         try:
             response = requests.post(
@@ -65,21 +79,38 @@ class OllamaClient:
                 payload["images"] = [self._image_to_base64(img) for img in images]
 
             # Optional: disable thinking mode for Qwen3 / DeepSeek models
-            if enable_thinking is not None:
+            if enable_thinking is not None and self._supports_chat_template_kwargs(model):
                 payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
-            response = requests.post(
-                f"{self.api_url}/generate",
-                json=payload
-            )
-            response.raise_for_status()
+            response = requests.post(f"{self.api_url}/generate", json=payload)
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # Compatibility fallback: some Ollama/model combinations reject chat_template_kwargs
+                if (
+                    response.status_code == 400
+                    and "chat_template_kwargs" in payload
+                ):
+                    fallback_payload = payload.copy()
+                    fallback_payload.pop("chat_template_kwargs", None)
+                    response = requests.post(f"{self.api_url}/generate", json=fallback_payload)
+                    response.raise_for_status()
+                else:
+                    raise e
+
             response_lines = response.text.strip().split('\n')
             final_response = json.loads(response_lines[-1])
             return final_response
 
         except requests.exceptions.RequestException as e:
-            print(f"Error generating completion: {e}")
-            return {}
+            resp = getattr(e, "response", None)
+            detail = self._error_text(resp)
+            print(f"Error generating completion: {e}; response={detail}")
+            return {
+                "response": "",
+                "error": detail or str(e),
+                "status_code": getattr(resp, "status_code", None),
+            }
 
     # -------------------------------------------------------------
     # Async variant  uses httpx so the caller can await multiple
@@ -103,13 +134,22 @@ class OllamaClient:
         if images:
             payload["images"] = [self._image_to_base64(img) for img in images]
 
-        if enable_thinking is not None:
+        if enable_thinking is not None and self._supports_chat_template_kwargs(model):
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(f"{self.api_url}/generate", json=payload)
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    if resp.status_code == 400 and "chat_template_kwargs" in payload:
+                        fallback_payload = payload.copy()
+                        fallback_payload.pop("chat_template_kwargs", None)
+                        resp = await client.post(f"{self.api_url}/generate", json=fallback_payload)
+                        resp.raise_for_status()
+                    else:
+                        raise e
                 return json.loads(resp.text.strip().split("\n")[-1])
         except (httpx.HTTPError, asyncio.CancelledError) as e:
             print(f"Async Ollama completion error: {e}")
@@ -136,7 +176,7 @@ class OllamaClient:
         payload: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
         if images:
             payload["images"] = [self._image_to_base64(img) for img in images]
-        if enable_thinking is not None:
+        if enable_thinking is not None and self._supports_chat_template_kwargs(model):
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
         with requests.post(f"{self.api_url}/generate", json=payload, stream=True) as resp:

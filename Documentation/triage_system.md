@@ -54,5 +54,7 @@ flowchart TD
 ## Failure / Fallback Modes
 1. If overview file missing  skip to LLM router.
 2. If LLM router errors  default to RAG (safer) but log warning.
+3. If PDF indexing hits Docling memory limits, converter falls back to PyMuPDF extraction so overviews can still be generated.
+   * Related env knobs: `RAG_LARGE_PDF_SIZE_MB`, `RAG_LARGE_PDF_PAGE_THRESHOLD`.
 
 ---

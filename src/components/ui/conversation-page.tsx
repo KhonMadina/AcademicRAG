@@ -5,10 +5,9 @@ import { useRef, useEffect, useState } from "react"
 import {
   ChatBubbleAvatar,
 } from "@/components/ui/chat-bubble"
-import { Copy, RefreshCcw, ThumbsUp, ThumbsDown, Volume2, MoreHorizontal, ChevronDown, Loader2, CheckCircle, XOctagon } from "lucide-react"
+import { Copy, RefreshCcw, MoreHorizontal, ChevronDown, Loader2, CheckCircle, XOctagon } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { ChatMessage } from "@/lib/api"
-import { cn } from "@/lib/utils"
+import { ChatMessage, Step } from "@/lib/api"
 import Markdown from "@/components/Markdown"
 import { normalizeWhitespace } from "@/utils/textNormalization"
 
@@ -28,21 +27,103 @@ const actionIcons = [
   // { icon: MoreHorizontal, type: "More", action: "more" },
 ]
 
+type CitationDoc = {
+  text?: string
+  chunk_id?: string | number
+  rerank_score?: number
+  score?: number
+  _distance?: number
+  [key: string]: unknown
+}
+
+type StepStatus = 'pending' | 'active' | 'done' | 'error'
+
+type StructuredStep = {
+  key?: string
+  label?: string
+  status?: StepStatus
+  details?: unknown
+  [key: string]: unknown
+}
+
+type StructuredContent = Array<Record<string, unknown>> | { steps: Step[] }
+
+type SubAnswerDetail = {
+  question: string
+  answer: string
+  source_documents?: CitationDoc[]
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isStructuredStepsContainer = (content: ChatMessage['content']): content is { steps: Step[] } =>
+  isObjectRecord(content) && Array.isArray(content.steps)
+
+const asStructuredSteps = (content: StructuredContent): StructuredStep[] =>
+  (Array.isArray(content) ? content : content.steps) as unknown as StructuredStep[]
+
+const toCitationDoc = (value: unknown): CitationDoc | null => {
+  if (!isObjectRecord(value)) return null
+  return value as CitationDoc
+}
+
+const toSubAnswerDetail = (value: unknown): SubAnswerDetail | null => {
+  if (!isObjectRecord(value)) return null
+  const question = typeof value.question === 'string' ? value.question : ''
+  const answer = typeof value.answer === 'string' ? value.answer : ''
+  const source_documents = Array.isArray(value.source_documents)
+    ? value.source_documents.map(toCitationDoc).filter((doc): doc is CitationDoc => doc !== null)
+    : undefined
+  if (!question) return null
+  return { question, answer, source_documents }
+}
+
+const extractTextFromMessageContent = (messageContent: ChatMessage['content']): string => {
+  if (typeof messageContent === 'string') return messageContent
+
+  if (Array.isArray(messageContent)) {
+    return messageContent
+      .map((segment) => {
+        if (!isObjectRecord(segment)) return ''
+        const text = typeof segment.text === 'string' ? segment.text : ''
+        const answer = typeof segment.answer === 'string' ? segment.answer : ''
+        return text || answer
+      })
+      .join('\n')
+  }
+
+  if (isStructuredStepsContainer(messageContent)) {
+    return messageContent.steps
+      .map((step) => `${step.label}${typeof step.details === 'string' ? `: ${step.details}` : ''}`)
+      .join('\n')
+  }
+
+  return ''
+}
+
 // Citation block toggle component
-function Citation({doc, idx}: {doc:any, idx:number}){
+function Citation({ doc, idx }: { doc: CitationDoc, idx: number }) {
   const [open,setOpen]=React.useState(false);
-  const preview = (doc.text||'').replace(/\s+/g,' ').trim().slice(0,160) + ((doc.text||'').length>160?'':'');
+  const docText = typeof doc.text === 'string' ? doc.text : ''
+  const preview = docText.replace(/\s+/g,' ').trim().slice(0,160) + (docText.length>160?'':'');
   return (
     <div onClick={()=>setOpen(!open)} className="text-xs text-gray-300 bg-gray-900/60 rounded p-2 cursor-pointer hover:bg-gray-800 transition">
-      <span className="font-semibold mr-1">[{idx+1}]</span>{open?doc.text:preview}
+      <span className="font-semibold mr-1">[{idx+1}]</span>{open ? docText : preview}
     </div>
   );
 }
 
 // NEW: Expandable list of citations per assistant message
-function CitationsBlock({docs}:{docs:any[]}){
-  const scored = docs.filter(d => d.rerank_score || d.score || d._distance)
-  scored.sort((a, b) => (b.rerank_score ?? b.score ?? 1/b._distance) - (a.rerank_score ?? a.score ?? 1/a._distance))
+function CitationsBlock({ docs }: { docs: CitationDoc[] }) {
+  const scored = React.useMemo(() => {
+    const filtered = docs.filter(d => typeof d?.rerank_score === 'number' || typeof d?.score === 'number' || typeof d?._distance === 'number')
+    return filtered.sort(
+      (a, b) =>
+        (b.rerank_score ?? b.score ?? (typeof b._distance === 'number' && b._distance !== 0 ? 1 / b._distance : 0)) -
+        (a.rerank_score ?? a.score ?? (typeof a._distance === 'number' && a._distance !== 0 ? 1 / a._distance : 0))
+    )
+  }, [docs])
   const [expanded, setExpanded] = useState(false);
 
   if (scored.length === 0) return null;
@@ -117,10 +198,16 @@ function ThinkingText({ text }: { text: string }) {
   );
 }
 
-function StructuredMessageBlock({ content }: { content: Array<Record<string, any>> | { steps: any[] } }) {
-  const steps: any[] = Array.isArray(content) ? content : (content as any).steps;
-  const finalStep = steps.find((s: any) => s.key === 'final');
-  const hasSubAnswers = steps.some((s: any) => s.key === 'answer' && Array.isArray(s.details) && s.details.length > 0);
+function StructuredMessageBlock({
+  content,
+  hideCitations = false,
+}: {
+  content: StructuredContent
+  hideCitations?: boolean
+}) {
+  const steps = asStructuredSteps(content)
+  const finalStep = steps.find((step) => step.key === 'final')
+  const hasSubAnswers = steps.some((step) => step.key === 'answer' && Array.isArray(step.details) && step.details.length > 0)
 
   // If final answer is reached, only show the final step
   if (finalStep && finalStep.status && finalStep.status !== 'pending') {
@@ -130,17 +217,17 @@ function StructuredMessageBlock({ content }: { content: Array<Record<string, any
       <div className="flex flex-col">
         <div className={statusClass}>
           <div className="flex items-center gap-2 mb-1">
-            <StepIcon status={finalStep.status} />
+            <StepIcon status={finalStep.status ?? 'pending'} />
             <span className="text-sm font-medium text-black">{finalStep.label}</span>
           </div>
           {/* Details for final step only */}
-          {finalStep.details && typeof finalStep.details === 'object' && !Array.isArray(finalStep.details) ? (
+          {isObjectRecord(finalStep.details) ? (
             <div className="space-y-3">
               <div className="whitespace-pre-wrap">
-                <ThinkingText text={normalizeWhitespace(finalStep.details.answer)} />
+                <ThinkingText text={normalizeWhitespace(typeof finalStep.details.answer === 'string' ? finalStep.details.answer : '')} />
               </div>
-              {!hasSubAnswers && finalStep.details.source_documents && finalStep.details.source_documents.length > 0 && (
-                <CitationsBlock docs={finalStep.details.source_documents} />
+              {!hideCitations && !hasSubAnswers && Array.isArray(finalStep.details.source_documents) && finalStep.details.source_documents.length > 0 && (
+                <CitationsBlock docs={finalStep.details.source_documents.map(toCitationDoc).filter((doc): doc is CitationDoc => doc !== null)} />
               )}
             </div>
           ) : finalStep.details && typeof finalStep.details === 'string' ? (
@@ -167,19 +254,20 @@ function StructuredMessageBlock({ content }: { content: Array<Record<string, any
 
   return (
     <div className="flex flex-col">
-      {visibleSteps.map((step: any, index: number) => {
+      {visibleSteps.map((step, index: number) => {
         if (step.key && step.label && step.key !== 'final') {
-          const borderCls = statusBorder[step.status] || statusBorder['pending'];
+          const stepStatus = step.status ?? 'pending';
+          const borderCls = statusBorder[stepStatus] || statusBorder['pending'];
           const statusClass = `timeline-card bg-white/25 shadow-sm card my-1 py-2 pl-3 pr-2 rounded border-l-2 ${borderCls}`;
           return (
             <div key={step.key} className={statusClass}>
               <div className="flex items-center gap-2 mb-1">
-                <StepIcon status={step.status} />
+                <StepIcon status={step.status ?? 'pending'} />
                 <span className="text-sm font-medium text-black">{step.label}</span>
               </div>
               {/* Details for each step */}
               {Array.isArray(step.details) ? (
-                step.key === 'decompose' && step.details.every((d: any)=> typeof d === 'string') ? (
+                step.key === 'decompose' && step.details.every((detail) => typeof detail === 'string') ? (
                   <ul className="list-disc list-inside space-y-1">
                     {step.details.map((q: string, idx:number)=>(
                       <li key={idx}>{q}</li>
@@ -187,15 +275,19 @@ function StructuredMessageBlock({ content }: { content: Array<Record<string, any
                   </ul>
                 ) : (
                   <div className="space-y-2">
-                    {step.details.map((detail: any, idx: number) => (
+                    {step.details.map((detail, idx: number) => {
+                      const parsed = toSubAnswerDetail(detail)
+                      if (!parsed) return null
+                      return (
                       <div key={idx} className="border-l-2 border-blue-400 pl-2">
-                        <div className="font-semibold">{detail.question}</div>
-                        <div><ThinkingText text={normalizeWhitespace(detail.answer)} /></div>
-                        {detail.source_documents && detail.source_documents.length > 0 && (
-                          <CitationsBlock docs={detail.source_documents} />
+                        <div className="font-semibold">{parsed.question}</div>
+                        <div><ThinkingText text={normalizeWhitespace(parsed.answer)} /></div>
+                        {!hideCitations && Array.isArray(parsed.source_documents) && parsed.source_documents.length > 0 && (
+                          <CitationsBlock docs={parsed.source_documents} />
                         )}
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )
               ) : (
@@ -266,17 +358,7 @@ export function ConversationPage({
   const handleAction = (action: string, messageId: string, messageContent: string) => {
     if (onAction) {
       // For structured messages, we'll just join the text parts for copy/paste
-      let contentToPass: string;
-      if (typeof messageContent === 'string') {
-        contentToPass = messageContent;
-      } else if (Array.isArray(messageContent)) {
-        contentToPass = (messageContent as any[]).map((s: any) => s.text || s.answer || '').join('\n');
-      } else if (messageContent && typeof messageContent === 'object' && Array.isArray((messageContent as any).steps)) {
-        // For {steps: Step[]} structure
-        contentToPass = (messageContent as any).steps.map((s: any) => s.label + (s.details ? (typeof s.details === 'string' ? (': ' + s.details) : '') : '')).join('\n');
-      } else {
-        contentToPass = '';
-      }
+      const contentToPass = messageContent;
       onAction(action, messageId, contentToPass)
       return
     }
@@ -311,11 +393,48 @@ export function ConversationPage({
         <div className="max-w-4xl mx-auto space-y-6">
           {messages.map((message) => {
             const isUser = message.sender === "user"
+            const metadata = message.metadata
+            const sourceDocs = Array.isArray(metadata?.source_documents)
+              ? metadata.source_documents.map(toCitationDoc).filter((doc): doc is CitationDoc => doc !== null)
+              : []
+
+            // If we have a placeholder "loading" message, hide it and rely on the global loader.
+            if (message.isLoading) return null
+
+            const steps = isStructuredStepsContainer(message.content)
+              ? message.content.steps
+              : undefined
+
+            const finalOrDirectStep = steps?.find(
+              (step) => step?.key === 'final' || step?.key === 'direct'
+            )
+
+            // Streaming can continue after global isLoading flips false; treat assistant message
+            // as "complete" only once the final/direct step is done, or backend marks it complete.
+            const isAssistantMessageComplete =
+              isUser ||
+              metadata?.message_type === 'complete' ||
+              !steps ||
+              finalOrDirectStep?.status === 'done'
+
+            const isAssistantMessageInProgress = !isAssistantMessageComplete
+
+            const shouldShowActions =
+              !isUser &&
+              !isLoading &&
+              !isAssistantMessageInProgress
+            const shouldShowCitations =
+              !isUser &&
+              !isLoading &&
+              !isAssistantMessageInProgress &&
+              typeof message.content === 'string' &&
+              Array.isArray(sourceDocs) &&
+              sourceDocs.length > 0
             
             return (
               <div key={message.id} className="w-full group">
                 <div className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
-                  {!isUser && !isLoading && (
+                  {!isUser && (
                     <ChatBubbleAvatar 
                       src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLWJvdC1pY29uIGx1Y2lkZS1ib3QiPjxwYXRoIGQ9Ik0xMiA4VjRIOCIvPjxyZWN0IHdpZHRoPSIxNiIgaGVpZ2h0PSIxMiIgeD0iNCIgeT0iOCIgcng9IjIiLz48cGF0aCBkPSJNMiAxNGgyIi8+PHBhdGggZD0iTTIwIDE0aDIiLz48cGF0aCBkPSJNMTUgMTN2MiIvPjxwYXRoIGQ9Ik05IDEzdjIiLz48L3N2Zz4="
                       className="mt-1 flex-shrink-0"
@@ -324,37 +443,23 @@ export function ConversationPage({
                   
                   <div className={`flex flex-col space-y-2 ${isUser ? 'items-end' : 'items-start'} max-w-full md:max-w-3xl`}>
                     <div
-                      className={`rounded-2xl px-5 py-4 ${
-                        isUser 
-                          ? "bg-black/5" 
-                          : "bg-black/5 "
-                      }`}
+                      className={`rounded-2xl px-5 py-4 ${isUser ? "bg-black/5" : "bg-black/5"}`}
                     >
-                      {message.isLoading ? (
-                        <div className="flex items-center space-x-2">
-                          <div className="flex space-x-1">
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="whitespace-pre-wrap text-base leading-relaxed">
-                          {typeof message.content === 'string' 
-                              ? <ThinkingText text={normalizeWhitespace(message.content)} />
-                              : <StructuredMessageBlock content={message.content} />
-                          }
-                        </div>
-                      )}
+                      <div className="whitespace-pre-wrap text-base leading-relaxed">
+                        {typeof message.content === 'string' 
+                            ? <ThinkingText text={normalizeWhitespace(message.content)} />
+                            : <StructuredMessageBlock content={message.content} hideCitations={isAssistantMessageInProgress} />
+                        }
+                      </div>
                     </div>
                     
-                    {!isUser && !message.isLoading && (
+                    {shouldShowActions && (
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                         {actionIcons.map(({ icon: Icon, type, action }) => (
                           <button
                             key={action}
                             onClick={() => {
-                              const content = typeof message.content === 'string' ? message.content : (message.content as any[]).map(s => s.text || s.answer).join('\\n');
+                              const content = extractTextFromMessageContent(message.content)
                               handleAction(action, message.id, content)
                             }}
                             className="p-1.5 hover:bg-gray-700 rounded-md transition-colors text-gray-400 hover:text-gray-200"
@@ -367,12 +472,8 @@ export function ConversationPage({
                     )}
 
                     {/* Global citations only for plain-string messages */}
-                    {(!isUser &&
-                      !message.isLoading &&
-                      typeof message.content === 'string' &&
-                      Array.isArray((message as any).metadata?.source_documents) &&
-                      (message as any).metadata.source_documents.length > 0) && (
-                        <CitationsBlock docs={(message as any).metadata.source_documents} />
+                    {shouldShowCitations && (
+                      <CitationsBlock docs={sourceDocs} />
                     )}
                   </div>
 

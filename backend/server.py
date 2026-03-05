@@ -833,9 +833,10 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 # Merge with any provided metadata
                 complete_metadata.update(metadata)
                 metadata = complete_metadata
-            
+
+            existing = db.get_index_by_name(name)
             idx_id = db.create_index(name, description, metadata)
-            self.send_json_response({'index_id': idx_id}, status_code=201)
+            self.send_json_response({'index_id': idx_id, 'reused': bool(existing)}, status_code=201)
         except Exception as e:
             self.send_json_response({'error': str(e)}, status_code=500)
     

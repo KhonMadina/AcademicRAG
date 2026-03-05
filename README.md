@@ -229,7 +229,20 @@ GENERATION_MODEL=gemma3:12b-cloud
 ENRICHMENT_MODEL=gemma3:4b-cloud
 EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 RERANKER_MODEL=answerdotai/answerai-colbert-small-v1
+
+# Optional: PDF memory guard for indexing stability
+# Bypass Docling pre-process for very large PDFs and use lightweight fallback extraction
+RAG_LARGE_PDF_SIZE_MB=40
+RAG_LARGE_PDF_PAGE_THRESHOLD=150
 ```
+
+### PDF Indexing Stability (Docling OOM Guard)
+
+AcademicRAG now protects indexing from Docling preprocess memory failures (e.g. `std::bad_alloc`) by:
+- bypassing Docling for large PDFs (size/page threshold),
+- auto-falling back to PyMuPDF text extraction if Docling conversion fails.
+
+Tune with `RAG_LARGE_PDF_SIZE_MB` and `RAG_LARGE_PDF_PAGE_THRESHOLD` in `.env`.
 
 #### 4. Initialize the System
 

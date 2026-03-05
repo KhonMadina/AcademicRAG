@@ -138,7 +138,7 @@ export function SessionSidebar({
           <Button
             onClick={handleNewSession}
             size="sm"
-            className="h-6 w-7 p-0 bg-transparent hover:bg-black/10 text-black/80"
+            className="h-6 w-7 p-0 bg-transparent hover:bg-black/10 text-black/80 hover:cursor-pointer"
             title="Return to Home"
           >
             <SquareArrowLeft className="size-5" />
@@ -179,9 +179,9 @@ export function SessionSidebar({
               {sessions.filter(session => session.message_count > 0).map((session) => (
                 <div
                   key={session.id}
-                  className={`relative group pl-1 rounded transition-colors ${currentSessionId === session.id 
+                  className={`relative group pl-1 rounded transition-colors mb-1 ${currentSessionId === session.id 
                     ? 'bg-black/50  text-white border-l-2 border-white'
-                    : 'hover:bg-black/10 bg-black/5 mb-1'
+                    : 'hover:bg-black/10 bg-black/5'
                     }`}
                 >
                   <button

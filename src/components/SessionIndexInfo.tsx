@@ -1,36 +1,87 @@
 import { useEffect, useState } from 'react';
-import { chatAPI, ChatSession } from '@/lib/api';
+import { chatAPI, ChatSession, type IndexDocument, type IndexSummary } from '@/lib/api';
 
 interface Props {
   sessionId: string;
   onClose: () => void;
 }
 
+interface IndexMetadata {
+  metadata_source?: string;
+  status?: string;
+  issue?: string;
+  chunk_size?: number;
+  chunk_size_inferred?: string;
+  chunk_overlap?: number;
+  retrieval_mode?: string;
+  retrieval_mode_inferred?: string;
+  embedding_model?: string;
+  embedding_model_inferred?: string;
+  inspection_limitation?: boolean;
+  vector_dimensions?: number;
+  total_chunks?: number;
+  window_size?: number;
+  enable_enrich?: boolean;
+  has_contextual_enrichment?: boolean;
+  latechunk?: boolean;
+  docling_chunk?: boolean;
+  has_fts_index?: boolean;
+  has_document_structure?: boolean;
+  enrich_model?: string;
+  overview_model?: string;
+  batch_size_embed?: number;
+  batch_size_enrich?: number;
+  metadata_inferred_at?: string;
+  sample_chunk_length?: number;
+  documents_count?: number;
+  created_at?: string;
+  vector_table_name?: string;
+  note?: string;
+  available_tables?: string[];
+  vector_table_expected?: string;
+  [key: string]: unknown;
+}
+
 export default function SessionIndexInfo({ sessionId, onClose }: Props) {
   const [files, setFiles] = useState<string[]>([]);
-  const [indexMeta, setIndexMeta] = useState<any | null>(null);
+  const [indexMeta, setIndexMeta] = useState<IndexMetadata | null>(null);
   const [session, setSession] = useState<ChatSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const toFallbackSession = (index: IndexSummary): ChatSession => ({
+    id: typeof index.id === 'string' ? index.id : typeof index.index_id === 'string' ? index.index_id : sessionId,
+    title: index.name,
+    created_at: typeof index.created_at === 'string' ? index.created_at : new Date().toISOString(),
+    updated_at: typeof index.updated_at === 'string' ? index.updated_at : new Date().toISOString(),
+    model_used: typeof index.model_used === 'string' ? index.model_used : '',
+    message_count: typeof index.message_count === 'number' ? index.message_count : 0,
+  });
 
   useEffect(() => {
     (async () => {
       try {
         const data = await chatAPI.getSessionIndexes(sessionId);
         const first = data.indexes[0];
-        if(first){
-          setSession(first.session??{...first, title:first.name, model_used:first.model_used||''});
-          setFiles(first.documents?.map((d:any)=>d.filename) || []);
-          setIndexMeta(first.metadata || {});
+        if (first) {
+          setSession(first.session ?? toFallbackSession(first));
+          const mappedFiles = (first.documents ?? [])
+            .map((doc: IndexDocument) => (typeof doc.filename === 'string' ? doc.filename : null))
+            .filter((name): name is string => Boolean(name));
+          setFiles(mappedFiles);
+          setIndexMeta((first.metadata as IndexMetadata) || {});
         } else {
           setError('No indexes linked to this chat');
         }
-      } catch (e:any){ setError(e.message||'Failed to load'); }
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Failed to load';
+        setError(message);
+      }
       finally{ setLoading(false);}
     })();
   }, [sessionId]);
 
-  const hasMetadata = indexMeta && Object.keys(indexMeta).length > 0;
+  const hasMetadata = Boolean(indexMeta && Object.keys(indexMeta).length > 0);
   const isInferredMetadata = indexMeta?.metadata_source === 'lancedb_inspection';
   const indexStatus = indexMeta?.status;
 

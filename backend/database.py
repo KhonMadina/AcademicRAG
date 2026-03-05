@@ -320,19 +320,64 @@ class ChatDatabase:
 
     # -------- Index helpers ---------
 
+    def _get_index_id_by_name(self, conn: sqlite3.Connection, name: str) -> Optional[str]:
+        cur = conn.execute('SELECT id FROM indexes WHERE name = ?', (name,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def _merge_index_metadata(self, conn: sqlite3.Connection, index_id: str, incoming_metadata: dict | None) -> str:
+        cur = conn.execute('SELECT metadata FROM indexes WHERE id = ?', (index_id,))
+        row = cur.fetchone()
+        existing_metadata = {}
+        if row and row[0]:
+            try:
+                existing_metadata = json.loads(row[0])
+            except Exception:
+                existing_metadata = {}
+        merged = {**existing_metadata, **(incoming_metadata or {})}
+        return json.dumps(merged)
+
     def create_index(self, name: str, description: str|None = None, metadata: dict | None = None) -> str:
-        idx_id = str(uuid.uuid4())
-        created = datetime.now().isoformat()
-        vector_table = f"text_pages_{idx_id}"
         conn = sqlite3.connect(self.db_path)
-        conn.execute('''
-            INSERT INTO indexes (id, name, description, created_at, updated_at, vector_table_name, metadata)
-            VALUES (?,?,?,?,?,?,?)
-        ''', (idx_id, name, description, created, created, vector_table, json.dumps(metadata or {})))
-        conn.commit()
-        conn.close()
-        print(f" Created new index '{name}' ({idx_id[:8]})")
-        return idx_id
+        try:
+            now = datetime.now().isoformat()
+
+            # Idempotent behavior: if an index with the same name exists, reuse it.
+            existing_id = self._get_index_id_by_name(conn, name)
+            if existing_id:
+                merged_metadata = self._merge_index_metadata(conn, existing_id, metadata)
+                conn.execute(
+                    '''
+                    UPDATE indexes
+                    SET description = COALESCE(?, description),
+                        updated_at = ?,
+                        metadata = ?
+                    WHERE id = ?
+                    ''',
+                    (description, now, merged_metadata, existing_id),
+                )
+                conn.commit()
+                print(f" Reusing existing index '{name}' ({existing_id[:8]})")
+                return existing_id
+
+            idx_id = str(uuid.uuid4())
+            vector_table = f"text_pages_{idx_id}"
+            conn.execute('''
+                INSERT INTO indexes (id, name, description, created_at, updated_at, vector_table_name, metadata)
+                VALUES (?,?,?,?,?,?,?)
+            ''', (idx_id, name, description, now, now, vector_table, json.dumps(metadata or {})))
+            conn.commit()
+            print(f" Created new index '{name}' ({idx_id[:8]})")
+            return idx_id
+        except sqlite3.IntegrityError:
+            # Race-safe fallback for concurrent create requests using the same name.
+            existing_id = self._get_index_id_by_name(conn, name)
+            if existing_id:
+                print(f" Reusing existing index after concurrent create '{name}' ({existing_id[:8]})")
+                return existing_id
+            raise
+        finally:
+            conn.close()
 
     def get_index(self, index_id: str) -> dict | None:
         conn = sqlite3.connect(self.db_path)
@@ -349,6 +394,18 @@ class ChatDatabase:
         idx['documents'] = docs
         conn.close()
         return idx
+
+    def get_index_by_name(self, name: str) -> dict | None:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute('SELECT * FROM indexes WHERE name = ?', (name,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        item['metadata'] = json.loads(item.get('metadata') or '{}')
+        return item
 
     def list_indexes(self) -> list[dict]:
         conn = sqlite3.connect(self.db_path)

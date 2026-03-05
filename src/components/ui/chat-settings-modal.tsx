@@ -101,7 +101,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
             <select
               value={opt.value}
               onChange={(e) => opt.setter(e.target.value)}
-              className="w-full px-3 py-2 bg-white/50 border border-black/30 rounded-lg  text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 "
+              className="w-full px-3 py-2 bg-white/50 border border-black/30 rounded-lg  text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 hover:cursor-pointer"
             >
               {opt.options.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -204,7 +204,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
         <div className="flex justify-end pt-6 border-t border-white/10 mt-6">
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm text-white"
+            className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm text-white hover:cursor-pointer"
           >
             Close
           </button>

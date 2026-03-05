@@ -186,7 +186,7 @@ export function ChatInput({
                 type="button"
                 onClick={()=>onOpenSettings && onOpenSettings()}
                 disabled={disabled || isLoading}
-                className="flex items-center gap-1 p-2 text-gray-600 hover:text-white hover:bg-gray-800 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-1 p-2 text-gray-600 hover:text-gray-800 hover:cursor-pointer hover:bg-black/5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Chat settings"
               >
                 <SettingsIcon className="w-5 h-5" />
@@ -198,7 +198,7 @@ export function ChatInput({
               type="submit"
               size="sm"
               disabled={(!message.trim() && attachedFiles.length === 0) || disabled || isLoading}
-              className="w-8 h-8 p-0 rounded-full bg-gray-600 hover:bg-gray-800 text-white disabled:bg-gray-600 disabled:text-gray-400"
+              className="w-8 h-8 p-0 rounded-full bg-gray-600 hover:bg-gray-800 hover:cursor-pointer text-white disabled:bg-gray-600 disabled:text-gray-400"
             >
               {isLoading ? (
                 <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />

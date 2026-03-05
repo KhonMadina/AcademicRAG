@@ -17,12 +17,12 @@ export interface Step {
   key: string;
   label: string;
   status: 'pending' | 'active' | 'done';
-  details: any;
+  details: unknown;
 }
 
 export interface ChatMessage {
   id: string;
-  content: string | Array<Record<string, any>> | { steps: Step[] };
+  content: string | Array<Record<string, unknown>> | { steps: Step[] };
   sender: 'user' | 'assistant';
   timestamp: string;
   isLoading?: boolean;
@@ -81,7 +81,67 @@ export interface SessionChatResponse {
   ai_message_id: string;
 }
 
+export interface IndexDocument {
+  filename?: string;
+  [key: string]: unknown;
+}
+
+export interface IndexSummary {
+  id?: string;
+  index_id?: string;
+  name: string;
+  title?: string;
+  documents?: IndexDocument[];
+  metadata?: Record<string, unknown>;
+  session?: ChatSession;
+  model_used?: string;
+  [key: string]: unknown;
+}
+
+export interface IndexListResponse {
+  indexes: IndexSummary[];
+  total: number;
+}
+
+type StreamEvent = {
+  type: string;
+  data: Record<string, unknown>;
+};
+
 class ChatAPI {
+  private normalizeIndexListResponse(payload: unknown): IndexListResponse {
+    const rawIndexes = Array.isArray(payload)
+      ? payload
+      : Array.isArray((payload as { indexes?: unknown[] })?.indexes)
+        ? (payload as { indexes: unknown[] }).indexes
+        : [];
+
+    const indexes: IndexSummary[] = rawIndexes
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .map((item) => {
+        const rawId = item.id ?? item.index_id;
+        const rawName = item.name ?? item.title;
+        const normalizedId = typeof rawId === 'string' ? rawId : undefined;
+        const normalizedName =
+          typeof rawName === 'string' && rawName.trim().length > 0
+            ? rawName
+            : normalizedId ?? 'Untitled index';
+
+        return {
+          ...item,
+          ...(normalizedId ? { id: normalizedId, index_id: normalizedId } : {}),
+          name: normalizedName,
+        } as IndexSummary;
+      });
+
+    const rawTotal = !Array.isArray(payload) && typeof payload === 'object'
+      ? (payload as { total?: unknown }).total
+      : undefined;
+    const total = typeof rawTotal === 'number' ? rawTotal : indexes.length;
+
+    return { indexes, total };
+  }
+
   async checkHealth(): Promise<HealthResponse> {
     try {
       const response = await fetch(`${API_BASE_URL}/health`);
@@ -199,7 +259,7 @@ class ChatAPI {
       forceRag?: boolean;
       provencePrune?: boolean;
     } = {}
-  ): Promise<SessionChatResponse & { source_documents: any[] }> {
+  ): Promise<SessionChatResponse & { source_documents: unknown[] }> {
     try {
       const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/messages`, {
         method: 'POST',
@@ -342,9 +402,9 @@ class ChatAPI {
   // Legacy upload function - can be removed if no longer needed
   async uploadPDFs(sessionId: string, files: File[]): Promise<{ 
     message: string; 
-    uploaded_files: any[]; 
-    processing_results: any[];
-    session_documents: any[];
+    uploaded_files: unknown[]; 
+    processing_results: unknown[];
+    session_documents: unknown[];
     total_session_documents: number;
   }> {
     try {
@@ -437,7 +497,7 @@ class ChatAPI {
 
   // ---------- Index endpoints ----------
 
-  async createIndex(name: string, description?: string, metadata: Record<string, unknown> = {}): Promise<{ index_id: string }> {
+  async createIndex(name: string, description?: string, metadata: Record<string, unknown> = {}): Promise<{ index_id: string; reused?: boolean }> {
     const resp = await fetch(`${API_BASE_URL}/indexes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -450,7 +510,7 @@ class ChatAPI {
     return resp.json();
   }
 
-  async uploadFilesToIndex(indexId: string, files: File[]): Promise<{ message: string; uploaded_files: any[] }> {
+  async uploadFilesToIndex(indexId: string, files: File[]): Promise<{ message: string; uploaded_files: unknown[] }> {
     const fd = new FormData();
     files.forEach((f) => fd.append('files', f, f.name));
     const resp = await fetch(`${API_BASE_URL}/indexes/${indexId}/upload`, { method: 'POST', body: fd });
@@ -518,18 +578,20 @@ class ChatAPI {
     return resp.json();
   }
 
-  async listIndexes(): Promise<{ indexes: any[]; total: number }> {
+  async listIndexes(): Promise<IndexListResponse> {
     const resp = await fetch(`${API_BASE_URL}/indexes`);
     if (!resp.ok) {
       throw new Error(`Failed to list indexes: ${resp.status}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    return this.normalizeIndexListResponse(payload);
   }
 
-  async getSessionIndexes(sessionId: string): Promise<{ indexes: any[]; total: number }> {
+  async getSessionIndexes(sessionId: string): Promise<IndexListResponse> {
     const resp = await fetch(`${API_BASE_URL}/sessions/${sessionId}/indexes`);
     if (!resp.ok) throw new Error(`Failed to get session indexes: ${resp.status}`);
-    return resp.json();
+    const payload = await resp.json();
+    return this.normalizeIndexListResponse(payload);
   }
 
   async deleteIndex(indexId: string): Promise<{ message: string }> {
@@ -564,7 +626,7 @@ class ChatAPI {
       forceRag?: boolean;
       provencePrune?: boolean;
     },
-    onEvent: (event: { type: string; data: any }) => void,
+    onEvent: (event: StreamEvent) => void,
   ): Promise<void> {
     const { query, model, session_id, table_name, composeSubAnswers, decompose, aiRerank, contextExpand, verify, retrievalK, contextWindowSize, rerankerTopK, searchType, denseWeight, forceRag, provencePrune } = params;
 
@@ -614,7 +676,7 @@ class ChatAPI {
         if (!line.startsWith('data:')) continue;
         const jsonStr = line.replace(/^data:\s*/, '');
         try {
-          const evt = JSON.parse(jsonStr);
+          const evt = JSON.parse(jsonStr) as StreamEvent;
           onEvent(evt);
           if (evt.type === 'complete') {
             // Gracefully close the stream so the caller unblocks

@@ -3,6 +3,7 @@ from rag_system.utils.ollama_client import OllamaClient
 from rag_system.ingestion.chunking import create_contextual_window
 import logging
 import re
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -34,50 +35,94 @@ class ContextualEnricher:
         self.llm_client = llm_client
         self.llm_model = llm_model
         self.batch_size = batch_size
+        self.max_prompt_tokens = int(os.getenv("RAG_ENRICH_PROMPT_MAX_TOKENS", "3000"))
+        self.min_summary_chars = int(os.getenv("RAG_ENRICH_MIN_SUMMARY_CHARS", "5"))
         logger.info(f"Initialized ContextualEnricher with Ollama model '{self.llm_model}' (batch_size={batch_size}).")
+
+    def _estimate_tokens(self, text: str) -> int:
+        # Fast approximation to keep this independent of model tokenizers.
+        return max(1, len(text) // 4)
+
+    def _truncate_for_token_budget(self, text: str, token_budget: int) -> str:
+        if token_budget <= 0:
+            return ""
+        # Keep head+tail for context continuity.
+        approx_chars = token_budget * 4
+        if len(text) <= approx_chars:
+            return text
+        head = int(approx_chars * 0.65)
+        tail = max(0, approx_chars - head)
+        return text[:head].rstrip() + "\n...\n" + text[-tail:].lstrip()
+
+    def _build_prompt(self, local_context_text: str, chunk_text: str, budget_scale: float = 1.0) -> str:
+        max_tokens = max(256, int(self.max_prompt_tokens * budget_scale))
+        static_shell = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"{LOCAL_CONTEXT_PROMPT_TEMPLATE.format(local_context_text='')}\n\n"
+            f"{CHUNK_PROMPT_TEMPLATE.format(chunk_content='')}"
+        )
+        static_tokens = self._estimate_tokens(static_shell)
+        variable_budget = max(64, max_tokens - static_tokens)
+
+        # Reserve more budget for current chunk than local context to guarantee relevance.
+        chunk_budget = max(32, int(variable_budget * 0.6))
+        context_budget = max(32, variable_budget - chunk_budget)
+
+        bounded_chunk = self._truncate_for_token_budget(chunk_text, chunk_budget)
+        bounded_context = self._truncate_for_token_budget(local_context_text, context_budget)
+
+        human_prompt_content = (
+            f"{LOCAL_CONTEXT_PROMPT_TEMPLATE.format(local_context_text=bounded_context)}\n\n"
+            f"{CHUNK_PROMPT_TEMPLATE.format(chunk_content=bounded_chunk)}"
+        )
+        return f"{SYSTEM_PROMPT}\n\n{human_prompt_content}"
+
+    def _fallback_summary(self, chunk_text: str) -> str:
+        # Deterministic fallback: short lead sentence to avoid empty enrichment metadata.
+        flat = " ".join(chunk_text.split())
+        if not flat:
+            return ""
+        clipped = flat[:260].rstrip()
+        if clipped and clipped[-1] not in ".!?":
+            clipped += "..."
+        return clipped
 
     def _generate_summary(self, local_context_text: str, chunk_text: str) -> str:
         """Generates a contextual summary using a structured, multi-part prompt."""
-        # Combine the templates to form the final content for the HumanMessage equivalent
-        human_prompt_content = (
-            f"{LOCAL_CONTEXT_PROMPT_TEMPLATE.format(local_context_text=local_context_text)}\n\n"
-            f"{CHUNK_PROMPT_TEMPLATE.format(chunk_content=chunk_text)}"
-        )
+        for scale in (1.0, 0.75, 0.55):
+            try:
+                full_prompt = self._build_prompt(local_context_text, chunk_text, budget_scale=scale)
+                response = self.llm_client.generate_completion(self.llm_model, full_prompt, enable_thinking=False)
+                summary_raw = response.get('response', '').strip()
 
-        try:
-            # Although we don't use LangChain's message objects, we can simulate the
-            # System + Human message structure in the single prompt for the Ollama client.
-            # A common way is to provide the system prompt and then the user's request.
-            full_prompt = f"{SYSTEM_PROMPT}\n\n{human_prompt_content}"
-            
-            response = self.llm_client.generate_completion(self.llm_model, full_prompt, enable_thinking=False)
-            summary_raw = response.get('response', '').strip()
+                # --- Sanitize the summary to remove chain-of-thought markers ---
+                cleaned = re.sub(r'<think[^>]*>.*?</think>', '', summary_raw, flags=re.IGNORECASE | re.DOTALL)
+                cleaned = re.sub(r'<assistant[^>]*>|</assistant>', '', cleaned, flags=re.IGNORECASE)
+                if 'Answer:' in cleaned:
+                    cleaned = cleaned.split('Answer:', 1)[1]
 
-            # --- Sanitize the summary to remove chain-of-thought markers ---
-            # Many Qwen models wrap reasoning in <think>...</think> or similar tags.
-            cleaned = re.sub(r'<think[^>]*>.*?</think>', '', summary_raw, flags=re.IGNORECASE | re.DOTALL)
-            # Remove any assistant role tags that may appear
-            cleaned = re.sub(r'<assistant[^>]*>|</assistant>', '', cleaned, flags=re.IGNORECASE)
-            # If the model used an explicit "Answer:" delimiter keep only the part after it
-            if 'Answer:' in cleaned:
-                cleaned = cleaned.split('Answer:', 1)[1]
+                summary = next((ln.strip() for ln in cleaned.splitlines() if ln.strip()), '')
+                if not summary:
+                    summary = summary_raw
 
-            # Take the first non-empty line to avoid leftover blank lines
-            summary = next((ln.strip() for ln in cleaned.splitlines() if ln.strip()), '')
+                if summary and len(summary) >= self.min_summary_chars:
+                    return summary
 
-            # Fallback to raw if cleaning removed everything
-            if not summary:
-                summary = summary_raw
+                error_text = str(response.get("error", "")).lower()
+                if "prompt too long" in error_text or "max context length" in error_text:
+                    logger.warning("Contextualizer prompt exceeded model context; retrying with smaller prompt budget.")
+                    continue
 
-            if not summary or len(summary) < 5:
-                logger.warning("Generated context summary is too short or empty. Skipping enrichment for this chunk.")
-                return ""
-            
-            return summary
+            except Exception as e:
+                logger.error(f"LLM invocation failed during contextualization (scale={scale}): {e}")
 
-        except Exception as e:
-            logger.error(f"LLM invocation failed during contextualization: {e}", exc_info=True)
-            return "" # Gracefully fail by returning no summary
+        fallback = self._fallback_summary(chunk_text)
+        if fallback and len(fallback) >= self.min_summary_chars:
+            logger.warning("Using fallback contextual summary due to repeated LLM truncation/failure.")
+            return fallback
+
+        logger.warning("Generated context summary is too short or empty. Skipping enrichment for this chunk.")
+        return ""
 
     def enrich_chunks(self, chunks: List[Dict[str, Any]], window_size: int = 1) -> List[Dict[str, Any]]:
         if not chunks:

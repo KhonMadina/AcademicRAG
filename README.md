@@ -1,22 +1,5 @@
 # AcademicRAG - Private Document Intelligence Platform
 
-<div align="center">
-
-<p align="center">
-</p>
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
-
-<p align="center">
-    <a href="https://x.com/engineerrprompt">
-      <img src="https://img.shields.io/badge/Follow%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow on X" />
-    </a>
-    <a href="https://discord.gg/tUDWAFGc">
-      <img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" />
-    </a>
-  </p>
-</div>
-
 ##  What is AcademicRAG?
 
 AcademicRAG is a sovereign, on-premise Document Intelligence platform designed for secure knowledge extraction. By ensuring all processing occurs locally, the system facilitates sophisticated data synthesis and summarization without compromising data privacy or permitting external egress.
@@ -708,8 +691,6 @@ Content-Type: application/json
 }
 ```
 
-For complete API documentation, see [API_REFERENCE.md](API_REFERENCE.md).
-
 ---
 
 ##  Architecture
@@ -798,17 +779,4 @@ npm install
 # Install Ollama and models
 curl -fsSL https://ollama.ai/install.sh | sh
 ollama pull gemma3:4b-cloud gemma3:12b-cloud
-
-# Verify setup
-python system_health_check.py
-python run_system.py --mode dev
-```
-
----
-
-##  License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. For models, please check their respective licenses.
-
-<div align="center">
 

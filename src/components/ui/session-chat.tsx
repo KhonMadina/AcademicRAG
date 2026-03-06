@@ -6,7 +6,7 @@ import { ChatInput } from "./chat-input"
 import { EmptyChatState } from "./empty-chat-state"
 import { ChatMessage, ChatSession, chatAPI, generateUUID } from "@/lib/api"
 import { AttachedFile } from "@/lib/types"
-import { useEffect, useState, forwardRef, useImperativeHandle, useCallback } from "react"
+import { useEffect, useState, forwardRef, useImperativeHandle, useCallback, useRef } from "react"
 import { normalizeStreamingToken } from "@/utils/textNormalization"
 import { Button } from "./button"
 import type { IndexSummary, Step } from '@/lib/api'
@@ -110,8 +110,14 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
   const [showSettings, setShowSettings] = useState(false)
   const [showIndexForm, setShowIndexForm] = useState(false)
   const [showIndexInfo, setShowIndexInfo] = useState(false)
+  const sessionLoadInFlightRef = useRef<string | null>(null)
+  const onSessionChangeRef = useRef(onSessionChange)
   
   const apiService = chatAPI
+
+  useEffect(() => {
+    onSessionChangeRef.current = onSessionChange
+  }, [onSessionChange])
 
   // Define loadSession with useCallback before useEffect
   const loadSession = useCallback(async (id: string) => {
@@ -123,8 +129,8 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
       setMessages(convertedMessages)
       setCurrentSession(session)
       
-      if (onSessionChange) {
-        onSessionChange(session)
+      if (onSessionChangeRef.current) {
+        onSessionChangeRef.current(session)
       }
 
       // Fetch linked indexes to know table name for streaming
@@ -142,22 +148,29 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
       console.error('Failed to load session:', error)
       setError('Failed to load session')
     }
-  }, [apiService, onSessionChange])
+  }, [apiService])
 
   // Load session when sessionId changes
   useEffect(() => {
     if (sessionId) {
-      // Only load session if we don't already have the current session
-      // This prevents overriding messages when a new session is created
-      if (!currentSession || currentSession.id !== sessionId) {
-        loadSession(sessionId)
+      const alreadyLoaded = currentSession?.id === sessionId
+      const alreadyLoading = sessionLoadInFlightRef.current === sessionId
+
+      // Prevent duplicate requests for the same session while a previous fetch is still in-flight
+      if (!alreadyLoaded && !alreadyLoading) {
+        sessionLoadInFlightRef.current = sessionId
+        loadSession(sessionId).finally(() => {
+          if (sessionLoadInFlightRef.current === sessionId) {
+            sessionLoadInFlightRef.current = null
+          }
+        })
       }
     } else {
       // Clear messages if no session
       setMessages([])
       setCurrentSession(null)
     }
-  }, [sessionId, currentSession, loadSession]) // Added missing dependencies
+  }, [sessionId, currentSession?.id, loadSession])
 
   // Fetch available models on mount
   useEffect(()=>{

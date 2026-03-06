@@ -5,6 +5,28 @@ from typing import List, Dict, Any
 import numpy as np
 import json
 
+
+def _normalize_chunk_metadata(chunk: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a compact, retrieval-friendly metadata payload.
+
+    Older revisions stored the *entire chunk object* inside the `metadata`
+    column, which duplicated text and made downstream parsing ambiguous.
+    Keep only the metadata dictionary here while preserving the fields needed
+    for backreferences and answer synthesis.
+    """
+    raw_metadata = chunk.get("metadata")
+    metadata = raw_metadata.copy() if isinstance(raw_metadata, dict) else {}
+
+    metadata.setdefault("document_id", chunk.get("document_id") or metadata.get("document_id") or "unknown")
+    metadata.setdefault("chunk_index", chunk.get("chunk_index", metadata.get("chunk_index", -1)))
+    metadata.setdefault("chunk_id", chunk.get("chunk_id"))
+
+    chunk_text = chunk.get("text")
+    if isinstance(chunk_text, str) and chunk_text and "original_text" not in metadata:
+        metadata["original_text"] = chunk_text
+
+    return metadata
+
 class LanceDBManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -27,7 +49,7 @@ class VectorIndexer:
     def __init__(self, db_manager: LanceDBManager):
         self.db_manager = db_manager
 
-    def index(self, table_name: str, chunks: List[Dict[str, Any]], embeddings: np.ndarray):
+    def index(self, table_name: str, chunks: List[Dict[str, Any]], embeddings: np.ndarray, *, replace_existing_documents: bool = True):
         if len(chunks) != len(embeddings):
             raise ValueError("The number of chunks and embeddings must be the same.")
         if not chunks:
@@ -63,13 +85,11 @@ class VectorIndexer:
                 skipped_count += 1
                 continue
             
-            # Ensure original_text is in metadata if not already present
-            if 'original_text' not in chunk['metadata']:
-                chunk['metadata']['original_text'] = chunk['text']
+            metadata = _normalize_chunk_metadata(chunk)
 
             # Extract document_id and chunk_index for top-level storage
-            doc_id = chunk.get("metadata", {}).get("document_id", "unknown")
-            chunk_idx = chunk.get("metadata", {}).get("chunk_index", -1)
+            doc_id = metadata.get("document_id", "unknown")
+            chunk_idx = metadata.get("chunk_index", -1)
 
             # Defensive check for text content to ensure it's a non-empty string
             text_content = chunk.get('text', '')
@@ -82,7 +102,7 @@ class VectorIndexer:
                 "chunk_id": chunk['chunk_id'],
                 "document_id": doc_id,
                 "chunk_index": chunk_idx,
-                "metadata": json.dumps(chunk)
+                "metadata": json.dumps(metadata, ensure_ascii=False, default=str)
             })
 
         if skipped_count > 0:
@@ -98,6 +118,18 @@ class VectorIndexer:
         if hasattr(db, "table_names") and table_name in db.table_names():
             tbl = self.db_manager.get_table(table_name)
             print(f"Appending {len(data)} vectors to existing table '{table_name}'.")
+
+            if replace_existing_documents:
+                document_ids = sorted({row["document_id"] for row in data if row.get("document_id") and row.get("document_id") != "unknown"})
+                replaced = 0
+                for document_id in document_ids:
+                    try:
+                        tbl.delete(f"document_id = {json.dumps(document_id)}")
+                        replaced += 1
+                    except Exception as e:
+                        print(f"  Could not delete existing rows for document '{document_id}': {e}")
+                if replaced:
+                    print(f" Replaced existing rows for {replaced} document(s) before re-indexing.")
         else:
             print(f"Creating table '{table_name}' (new) and adding {len(data)} vectors...")
             tbl = self.db_manager.create_table(table_name, schema=schema, mode="create")

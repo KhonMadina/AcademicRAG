@@ -111,8 +111,18 @@ export function IndexForm({ onClose, onIndexed }: Props) {
 
       // 3. build index (run pipeline) with ALL OPTIONS
       toast.loading('Building index...', { id: toastId });
+
+      Swal.fire({
+        title: 'Processing...',
+        html: 'Please wait while we process your request',
+        allowOutsideClick: false,
+        didOpen: () => {
+          Swal.showLoading();
+        }
+      });
+
       await chatAPI.buildIndex(index_id, {
-        latechunk: enableLateChunk, 
+        latechunk: enableLateChunk,
         doclingChunk: enableDoclingChunk,
         chunkSize,
         chunkOverlap,
@@ -156,25 +166,18 @@ export function IndexForm({ onClose, onIndexed }: Props) {
       });
     } finally {
       setLoading(false);
+      Swal.close();
     }
   };
 
   return (
     <div className="relative bg-white/80 rounded-xl p-6 w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth space-y-6 border border-black/20 shadow-2xl" aria-busy={loading}>
-      {/* Loading overlay */}
-      {loading && (
-        <div className="absolute inset-0 backdrop-blur flex flex-col items-center justify-center rounded-xl z-20">
-          <div className="w-10 h-10 border-4 border-black/30 border-t-transparent rounded-full animate-spin"></div>
-          <p className="mt-4 text-sm">Indexing this may take a moment</p>
-        </div>
-      )}
-
       <h2 className="text-lg font-semibold">Create new index</h2>
 
       {/* Name of index */}
       <div>
         <label className="block text-xs uppercase tracking-wide font-semibold mb-2 ">Name of index</label>
-        <GlassInput placeholder="My project docs" value={indexName} onChange={(e)=>setIndexName(e.target.value)} />
+        <GlassInput placeholder="My project docs" value={indexName} onChange={(e) => setIndexName(e.target.value)} />
       </div>
 
       {/* Upload & defaults */}
@@ -184,15 +187,15 @@ export function IndexForm({ onClose, onIndexed }: Props) {
           <label
             htmlFor="file-upload"
             className="flex flex-col items-center justify-center w-full h-16 border border-dashed border-black/20 rounded cursor-pointer hover:border-black/40 transition"
-            onDragOver={(e)=>e.preventDefault()}
-            onDrop={(e)=>{
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
               e.preventDefault();
               if (e.dataTransfer.files) {
                 mergeFiles(Array.from(e.dataTransfer.files));
               }
             }}
           >
-            <svg width="32" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-2"><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="16"/></svg>
+            <svg width="32" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-2"><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /><polyline points="7 10 12 5 17 10" /><line x1="12" y1="5" x2="12" y2="16" /></svg>
             <span className="text-xs mb-2">Drag & Drop documents here or click to browse</span>
             <input
               id="file-upload"
@@ -230,14 +233,14 @@ export function IndexForm({ onClose, onIndexed }: Props) {
               </ul>
             </div>
           )}
-            </div>
+        </div>
 
         {/* Retrieval mode & Late-chunk toggle */}
         <div>
           <label className="flex items-center gap-1 text-xs uppercase tracking-wide mb-2 border-t border-black/10 font-semibold py-4">Retrieval mode <InfoTooltip text="Choose how chunks are found. Hybrid combines full-text search with vectors; FTS uses textual matching only; Vector relies purely on dense similarity." /></label>
           <div className="flex gap-3">
-            {(['hybrid','vector','fts'] as const).map((m)=>(
-              <button type="button" key={m} disabled={loading} onClick={()=>setRetrievalMode(m)} className={`px-3 py-1 rounded text-xs font-sans hover:cursor-pointer border border-black/30 ${retrievalMode===m?'bg-green-700/90 text-white':'bg-white/10 hover:bg-white/20'}`}>{m==='fts' ? 'FTS' : m}</button>
+            {(['hybrid', 'vector', 'fts'] as const).map((m) => (
+              <button type="button" key={m} disabled={loading} onClick={() => setRetrievalMode(m)} className={`px-3 py-1 rounded text-xs font-sans hover:cursor-pointer border border-black/30 ${retrievalMode === m ? 'bg-green-700/90 text-white' : 'bg-white/10 hover:bg-white/20'}`}>{m === 'fts' ? 'FTS' : m}</button>
             ))}
           </div>
           <div className="grid grid-cols-2 gap-4 mt-4">
@@ -270,8 +273,8 @@ export function IndexForm({ onClose, onIndexed }: Props) {
           <div className="grid grid-cols-2 gap-4 mt-4">
             <div>
               <label className="flex items-center gap-1 text-xs mb-2 ">Embedding model <InfoTooltip text="Model used to generate dense vectors stored in the index." size={12} /></label>
-              <ModelSelect 
-                value={embeddingModel} 
+              <ModelSelect
+                value={embeddingModel}
                 onChange={setEmbeddingModel}
                 type="embedding"
                 placeholder="Select embedding model"
@@ -279,7 +282,7 @@ export function IndexForm({ onClose, onIndexed }: Props) {
             </div>
             <div>
               <label className="flex items-center gap-1 text-xs mb-2 ">Overview LLM <InfoTooltip text="LLM that writes the short overview paragraph per document." size={12} /></label>
-              <ModelSelect 
+              <ModelSelect
                 value={overviewModel}
                 onChange={setOverviewModel}
                 type="generation"
@@ -293,16 +296,16 @@ export function IndexForm({ onClose, onIndexed }: Props) {
         <AccordionGroup title={<><span className="font-semibold">Contextual Retrieval</span> <InfoTooltip text="Adds neighbour chunks into each original chunk then enriches with LLM  improves semantic continuity but increases indexing latency." /></>}>
           <div className="flex items-center gap-3">
             <span className="text-xs ">Enable</span>
-            <GlassToggle checked={enableEnrich} onChange={setEnableEnrich}/>
+            <GlassToggle checked={enableEnrich} onChange={setEnableEnrich} />
           </div>
           <div className="grid grid-cols-2 gap-4 mt-3">
             <div>
               <label className="flex items-center gap-1 text-xs mb-1 ">Context window <InfoTooltip text="Number of neighbour chunks included when enriching context." size={12} /></label>
-              <GlassInput type="number" min={1} value={windowSize} onChange={(e)=>setWindowSize(toBoundedInt(e.target.value, DEFAULT_WINDOW_SIZE, 1, 50))} />
+              <GlassInput type="number" min={1} value={windowSize} onChange={(e) => setWindowSize(toBoundedInt(e.target.value, DEFAULT_WINDOW_SIZE, 1, 50))} />
             </div>
             <div>
               <label className="block text-xs mb-1 ">Retrieval LLM</label>
-              <ModelSelect 
+              <ModelSelect
                 value={enrichModel}
                 onChange={setEnrichModel}
                 type="generation"
@@ -338,7 +341,7 @@ export function IndexForm({ onClose, onIndexed }: Props) {
       </AccordionGroup>
 
       <div className="flex justify-end gap-3 pt-4 border-t border-black/10">
-        <button  disabled={loading} onClick={onClose} className="px-4 py-2 disabled:opacity-40 bg-red-800/80 rounded hover:bg-red-800 text-sm hover:cursor-pointer text-white">
+        <button disabled={loading} onClick={onClose} className="px-4 py-2 disabled:opacity-40 bg-red-800/80 rounded hover:bg-red-800 text-sm hover:cursor-pointer text-white">
           Cancel
         </button>
         <button

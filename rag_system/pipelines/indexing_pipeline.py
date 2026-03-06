@@ -49,7 +49,9 @@ class IndexingPipeline:
                 tokenizer_model=config.get("embedding_model_name", "Qwen/Qwen3-Embedding-0.6B")
             )
 
-        retriever_configs = self.config.get("retrievers") or self.config.get("retrieval", {})
+        retriever_configs = dict(self.config.get("retrievers") or self.config.get("retrieval", {}))
+        if "latechunk" not in retriever_configs and "late_chunking" in retriever_configs:
+            retriever_configs["latechunk"] = retriever_configs["late_chunking"]
         storage_config = self.config["storage"]
         
         # Get batch processing configuration
@@ -57,6 +59,9 @@ class IndexingPipeline:
         self.embedding_batch_size = indexing_config.get("embedding_batch_size", 50)
         self.enrichment_batch_size = indexing_config.get("enrichment_batch_size", 10)
         self.enable_progress_tracking = indexing_config.get("enable_progress_tracking", True)
+        self.replace_existing_documents = indexing_config.get("replace_existing_documents", True)
+        self.max_safe_embedding_batch = int(os.getenv("RAG_MAX_EMBED_BATCH", "24"))
+        self.max_safe_enrichment_batch = int(os.getenv("RAG_MAX_ENRICH_BATCH", "24"))
 
         # Treat dense retrieval as enabled by default unless explicitly disabled
         dense_cfg = retriever_configs.setdefault("dense", {})
@@ -118,11 +123,11 @@ class IndexingPipeline:
         # ------------------------------------------------------------------
         # Late-Chunk encoder initialisation (optional)
         # ------------------------------------------------------------------
-        self.latechunk_enabled = retriever_configs.get("latechunk", {}).get("enabled", False)
+        self.latechunk_cfg = retriever_configs.get("latechunk", {})
+        self.latechunk_enabled = self.latechunk_cfg.get("enabled", False)
         if self.latechunk_enabled:
             try:
                 from rag_system.indexing.latechunk import LateChunkEncoder
-                self.latechunk_cfg = retriever_configs["latechunk"]
                 self.latechunk_encoder = LateChunkEncoder(model_name=self.config.get("embedding_model_name", "qwen3-embedding-0.6b"))
             except Exception as e:
                 print(f"  Failed to initialise LateChunkEncoder: {e}. Disabling latechunk retrieval.")
@@ -204,6 +209,23 @@ class IndexingPipeline:
             memory_mb = estimate_memory_usage(all_chunks)
             print(f" Estimated memory usage: {memory_mb:.1f}MB")
 
+            # Auto-clamp batch sizes for stability on large indexing jobs.
+            if len(all_chunks) >= 48:
+                new_embed_batch = min(getattr(self.embedding_generator, "batch_size", self.embedding_batch_size), self.max_safe_embedding_batch) if hasattr(self, 'embedding_generator') else self.embedding_batch_size
+                if hasattr(self, 'embedding_generator') and getattr(self.embedding_generator, "batch_size", None) != new_embed_batch:
+                    old_val = self.embedding_generator.batch_size
+                    self.embedding_generator.batch_size = new_embed_batch
+                    self.embedding_batch_size = new_embed_batch
+                    print(f"  Auto-clamped embedding batch size for stability: {old_val} -> {new_embed_batch}")
+
+                if hasattr(self, 'contextual_enricher'):
+                    new_enrich_batch = min(getattr(self.contextual_enricher, "batch_size", self.enrichment_batch_size), self.max_safe_enrichment_batch)
+                    if getattr(self.contextual_enricher, "batch_size", None) != new_enrich_batch:
+                        old_val = self.contextual_enricher.batch_size
+                        self.contextual_enricher.batch_size = new_enrich_batch
+                        self.enrichment_batch_size = new_enrich_batch
+                        print(f"  Auto-clamped enrichment batch size for stability: {old_val} -> {new_enrich_batch}")
+
             retriever_configs = self.config.get("retrievers") or self.config.get("retrieval", {})
 
             # Step 3: Optional Contextual Enrichment (before indexing for consistency)
@@ -275,7 +297,12 @@ class IndexingPipeline:
                     embeddings = self.embedding_generator.generate(all_chunks)
                     
                     print(f"\n--- Indexing {len(embeddings)} vectors into LanceDB table: {table_name} ---")
-                    self.vector_indexer.index(table_name, all_chunks, embeddings)
+                    self.vector_indexer.index(
+                        table_name,
+                        all_chunks,
+                        embeddings,
+                        replace_existing_documents=self.replace_existing_documents,
+                    )
                     print(" Vector embeddings indexed successfully")
 
                     # Create FTS index on the 'text' field after adding data
@@ -305,7 +332,7 @@ class IndexingPipeline:
                     # ---------------------------------------------------
                     if self.latechunk_enabled:
                         with timer("Late-Chunk Embedding & Indexing"):
-                            lc_table_name = self.latechunk_cfg.get("lancedb_table_name", f"{table_name}_lc")
+                            lc_table_name = self.latechunk_cfg.get("lancedb_table_name") or self.latechunk_cfg.get("table_name", f"{table_name}_lc")
                             print(f"\n--- Generating late-chunk embeddings (table={lc_table_name}) ---")
 
                             total_lc_vecs = 0
@@ -336,7 +363,12 @@ class IndexingPipeline:
                                     print(f"  Mismatch LC vecs ({len(lc_vecs)}) vs chunks ({len(doc_chunks)}) for {doc_id}. Skipping.")
                                     continue
 
-                                self.vector_indexer.index(lc_table_name, doc_chunks, lc_vecs)
+                                self.vector_indexer.index(
+                                    lc_table_name,
+                                    doc_chunks,
+                                    lc_vecs,
+                                    replace_existing_documents=self.replace_existing_documents,
+                                )
                                 total_lc_vecs += len(lc_vecs)
 
                             print(f" Late-chunk vectors indexed: {total_lc_vecs}")

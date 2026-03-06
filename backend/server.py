@@ -8,6 +8,9 @@ from urllib.parse import urlparse, parse_qs
 import requests  #  Import requests for making HTTP calls
 import sys
 from datetime import datetime
+import time
+import threading
+import traceback
 
 # Add parent directory to path so we can import rag_system modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +31,130 @@ import simple_pdf_processor as pdf_module
 from simple_pdf_processor import initialize_simple_pdf_processor
 from typing import List, Dict, Any
 import re
+
+
+_INDEX_BUILD_LOCK = threading.Lock()
+_ACTIVE_INDEX_BUILDS: set[str] = set()
+
+
+def _run_index_build_job(index_id: str, file_paths: List[str], table_name: str, options: Dict[str, Any]):
+    """Run a potentially long index build out-of-band and persist progress in index metadata."""
+    rag_api_url = "http://localhost:8001/index"
+    latechunk = bool(options.get("latechunk", False))
+    docling_chunk = bool(options.get("docling_chunk", False))
+    chunk_size = int(options.get("chunk_size", 512))
+    chunk_overlap = int(options.get("chunk_overlap", 64))
+    retrieval_mode = str(options.get("retrieval_mode", "hybrid"))
+    window_size = int(options.get("window_size", 2))
+    enable_enrich = bool(options.get("enable_enrich", True))
+    embedding_model = options.get("embedding_model")
+    enrich_model = options.get("enrich_model")
+    overview_model = options.get("overview_model")
+    batch_size_embed = int(options.get("batch_size_embed", 50))
+    batch_size_enrich = int(options.get("batch_size_enrich", 25))
+
+    payload = {
+        "file_paths": file_paths,
+        "session_id": index_id,
+        "table_name": table_name,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "retrieval_mode": retrieval_mode,
+        "window_size": window_size,
+        "enable_enrich": enable_enrich,
+        "batch_size_embed": batch_size_embed,
+        "batch_size_enrich": batch_size_enrich,
+    }
+    if latechunk:
+        payload["enable_latechunk"] = True
+    if docling_chunk:
+        payload["enable_docling_chunk"] = True
+    if embedding_model:
+        payload["embeddingModel"] = embedding_model
+        payload["embedding_model"] = embedding_model
+    if enrich_model:
+        payload["enrichModel"] = enrich_model
+        payload["enrich_model"] = enrich_model
+    if overview_model:
+        payload["overviewModel"] = overview_model
+        payload["overview_model_name"] = overview_model
+
+    try:
+        rag_resp = None
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                rag_resp = requests.post(rag_api_url, json=payload, timeout=(10, 1800))
+                if rag_resp.status_code in (502, 503, 504) and attempt < 3:
+                    wait_s = 1.5 * attempt
+                    print(f"Transient RAG API status {rag_resp.status_code}; retrying build in {wait_s:.1f}s (attempt {attempt}/3)")
+                    time.sleep(wait_s)
+                    continue
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) and attempt < 3:
+                    wait_s = 1.5 * attempt
+                    print(f"Transient RAG API connection error: {e}; retrying in {wait_s:.1f}s (attempt {attempt}/3)")
+                    time.sleep(wait_s)
+                    continue
+                raise
+
+        if rag_resp is None and last_error is not None:
+            raise last_error
+
+        meta_updates = {
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+            "retrieval_mode": retrieval_mode,
+            "window_size": window_size,
+            "enable_enrich": enable_enrich,
+            "latechunk": latechunk,
+            "docling_chunk": docling_chunk,
+            "batch_size_embed": batch_size_embed,
+            "batch_size_enrich": batch_size_enrich,
+            "build_completed_at": datetime.now().isoformat(),
+        }
+        if embedding_model:
+            meta_updates["embedding_model"] = embedding_model
+        if enrich_model:
+            meta_updates["enrich_model"] = enrich_model
+        if overview_model:
+            meta_updates["overview_model"] = overview_model
+
+        if rag_resp.status_code == 200:
+            meta_updates.update({
+                "status": "functional",
+                "build_error": None,
+                "last_build_response": rag_resp.json(),
+            })
+            db.update_index_metadata(index_id, meta_updates)
+        else:
+            try:
+                err_json = rag_resp.json()
+            except Exception:
+                err_json = {}
+            err_text = err_json.get("error") if isinstance(err_json, dict) else rag_resp.text
+            if err_text and "already exists" in str(err_text):
+                meta_updates.update({
+                    "status": "functional",
+                    "build_error": None,
+                    "note": str(err_text),
+                })
+                db.update_index_metadata(index_id, meta_updates)
+            else:
+                raise RuntimeError(f"RAG indexing failed: {err_text or rag_resp.text}")
+    except Exception as e:
+        db.update_index_metadata(index_id, {
+            "status": "failed",
+            "build_error": str(e),
+            "build_completed_at": datetime.now().isoformat(),
+            "build_traceback": traceback.format_exc(limit=20),
+        })
+        print(f"Background build failed for index {index_id[:8]}...: {e}")
+    finally:
+        with _INDEX_BUILD_LOCK:
+            _ACTIVE_INDEX_BUILDS.discard(index_id)
 
 #  Reusable TCPServer with address reuse enabled
 class ReusableTCPServer(socketserver.TCPServer):
@@ -905,85 +1032,70 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     # Keep defaults on parse error
                     pass
 
-            # Set per-index overview file path
-            overview_path = f"index_store/overviews/{index_id}.jsonl"
-
-            # Ensure config_override includes overview_path
-            def ensure_overview_path(cfg: dict):
-                cfg["overview_path"] = overview_path
-            
-            # we'll inject later when we build config_override
-
-            # Delegate to advanced RAG API same as session indexing
-            rag_api_url = "http://localhost:8001/index"
-            import requests, json as _json
-            # Use the index's dedicated LanceDB table so retrieval matches
             table_name = index.get("vector_table_name")
-            payload = {
-                "file_paths": file_paths,
-                "session_id": index_id,  # reuse index_id for progress tracking
-                "table_name": table_name,
+            with _INDEX_BUILD_LOCK:
+                if index_id in _ACTIVE_INDEX_BUILDS or (index.get("metadata") or {}).get("status") == "building":
+                    self.send_json_response({
+                        "message": "Index build already in progress.",
+                        "index_id": index_id,
+                        "status": "building",
+                    }, status_code=202)
+                    return
+                _ACTIVE_INDEX_BUILDS.add(index_id)
+
+            db.update_index_metadata(index_id, {
+                "status": "building",
+                "build_error": None,
+                "build_traceback": None,
+                "build_started_at": datetime.now().isoformat(),
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
                 "retrieval_mode": retrieval_mode,
                 "window_size": window_size,
                 "enable_enrich": enable_enrich,
+                "latechunk": latechunk,
+                "docling_chunk": docling_chunk,
                 "batch_size_embed": batch_size_embed,
-                "batch_size_enrich": batch_size_enrich
-            }
-            if latechunk:
-                payload["enable_latechunk"] = True
-            if docling_chunk:
-                payload["enable_docling_chunk"] = True
-            if embedding_model:
-                payload["embedding_model"] = embedding_model
-            if enrich_model:
-                payload["enrich_model"] = enrich_model
-            if overview_model:
-                payload["overview_model_name"] = overview_model
-                
-            rag_resp = requests.post(rag_api_url, json=payload)
-            if rag_resp.status_code==200:
-                meta_updates = {
-                    "chunk_size": chunk_size,
-                    "chunk_overlap": chunk_overlap,
-                    "retrieval_mode": retrieval_mode,
-                    "window_size": window_size,
-                    "enable_enrich": enable_enrich,
-                    "latechunk": latechunk,
-                    "docling_chunk": docling_chunk,
-                }
-                if embedding_model:
-                    meta_updates["embedding_model"] = embedding_model
-                if enrich_model:
-                    meta_updates["enrich_model"] = enrich_model
-                if overview_model:
-                    meta_updates["overview_model"] = overview_model
-                try:
-                    db.update_index_metadata(index_id, meta_updates)
-                except Exception as e:
-                    print(f" Failed to update index metadata: {e}")
+                "batch_size_enrich": batch_size_enrich,
+                **({"embedding_model": embedding_model} if embedding_model else {}),
+                **({"enrich_model": enrich_model} if enrich_model else {}),
+                **({"overview_model": overview_model} if overview_model else {}),
+            })
 
-                self.send_json_response({
-                    "response": rag_resp.json(),
-                    **meta_updates
-                })
-            else:
-                # Gracefully handle scenario where table already exists (idempotent build)
-                try:
-                    err_json = rag_resp.json()
-                except Exception:
-                    err_json = {}
-                err_text = err_json.get('error') if isinstance(err_json, dict) else rag_resp.text
-                if err_text and 'already exists' in err_text:
-                    # Treat as non-fatal; return message indicating index previously built
-                    self.send_json_response({
-                        "message": "Index already built  skipping rebuild.",
-                        "note": err_text
-                })
-                else:
-                    self.send_json_response({"error":f"RAG indexing failed: {rag_resp.text}"}, status_code=500)
+            worker = threading.Thread(
+                target=_run_index_build_job,
+                args=(
+                    index_id,
+                    file_paths,
+                    table_name,
+                    {
+                        "latechunk": latechunk,
+                        "docling_chunk": docling_chunk,
+                        "chunk_size": chunk_size,
+                        "chunk_overlap": chunk_overlap,
+                        "retrieval_mode": retrieval_mode,
+                        "window_size": window_size,
+                        "enable_enrich": enable_enrich,
+                        "embedding_model": embedding_model,
+                        "enrich_model": enrich_model,
+                        "overview_model": overview_model,
+                        "batch_size_embed": batch_size_embed,
+                        "batch_size_enrich": batch_size_enrich,
+                    },
+                ),
+                daemon=True,
+                name=f"index-build-{index_id[:8]}",
+            )
+            worker.start()
+
+            self.send_json_response({
+                "message": "Index build started.",
+                "index_id": index_id,
+                "status": "building",
+            }, status_code=202)
         except Exception as e:
+            with _INDEX_BUILD_LOCK:
+                _ACTIVE_INDEX_BUILDS.discard(index_id)
             self.send_json_response({'error':str(e)}, status_code=500)
     
     def handle_link_index_to_session(self, session_id: str, index_id: str):

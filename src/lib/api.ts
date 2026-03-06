@@ -98,6 +98,12 @@ export interface IndexSummary {
   [key: string]: unknown;
 }
 
+export interface IndexBuildResponse {
+  message: string;
+  index_id?: string;
+  status?: string;
+}
+
 export interface IndexListResponse {
   indexes: IndexSummary[];
   total: number;
@@ -109,6 +115,70 @@ type StreamEvent = {
 };
 
 class ChatAPI {
+  private inFlightGetRequests = new Map<string, Promise<unknown>>();
+  private getResponseCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+  private async getJson<T>(
+    url: string,
+    options: {
+      cacheTtlMs?: number;
+      cacheKey?: string;
+      errorMessage?: string;
+    } = {},
+  ): Promise<T> {
+    const { cacheTtlMs = 0, cacheKey = url, errorMessage = 'Request failed' } = options;
+    const now = Date.now();
+
+    if (cacheTtlMs > 0) {
+      const cached = this.getResponseCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        return cached.value as T;
+      }
+    }
+
+    const inFlight = this.inFlightGetRequests.get(cacheKey);
+    if (inFlight) {
+      return inFlight as Promise<T>;
+    }
+
+    const requestPromise = (async () => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`${errorMessage}: ${response.status}`);
+      }
+
+      const payload = await response.json();
+
+      if (cacheTtlMs > 0) {
+        this.getResponseCache.set(cacheKey, {
+          expiresAt: Date.now() + cacheTtlMs,
+          value: payload,
+        });
+      }
+
+      return payload as T;
+    })();
+
+    this.inFlightGetRequests.set(cacheKey, requestPromise as Promise<unknown>);
+
+    try {
+      return await requestPromise;
+    } finally {
+      if (this.inFlightGetRequests.get(cacheKey) === requestPromise) {
+        this.inFlightGetRequests.delete(cacheKey);
+      }
+    }
+  }
+
+  private invalidateGetCache(match: string | RegExp): void {
+    for (const key of this.getResponseCache.keys()) {
+      const matched = typeof match === 'string' ? key.includes(match) : match.test(key);
+      if (matched) {
+        this.getResponseCache.delete(key);
+      }
+    }
+  }
+
   private normalizeIndexListResponse(payload: unknown): IndexListResponse {
     const rawIndexes = Array.isArray(payload)
       ? payload
@@ -144,11 +214,10 @@ class ChatAPI {
 
   async checkHealth(): Promise<HealthResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/health`);
-      if (!response.ok) {
-        throw new Error(`Health check failed: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<HealthResponse>(`${API_BASE_URL}/health`, {
+        cacheTtlMs: 3000,
+        errorMessage: 'Health check failed',
+      });
     } catch (error) {
       console.error('Health check failed:', error);
       throw error;
@@ -194,11 +263,10 @@ class ChatAPI {
   // Session Management
   async getSessions(): Promise<SessionResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/sessions`);
-      if (!response.ok) {
-        throw new Error(`Failed to get sessions: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<SessionResponse>(`${API_BASE_URL}/sessions`, {
+        cacheTtlMs: 1500,
+        errorMessage: 'Failed to get sessions',
+      });
     } catch (error) {
       console.error('Get sessions failed:', error);
       throw error;
@@ -220,6 +288,7 @@ class ChatAPI {
       }
 
       const data = await response.json();
+      this.invalidateGetCache('/sessions');
       return data.session;
     } catch (error) {
       console.error('Create session failed:', error);
@@ -229,11 +298,10 @@ class ChatAPI {
 
   async getSession(sessionId: string): Promise<{ session: ChatSession; messages: ChatMessage[] }> {
     try {
-      const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}`);
-      if (!response.ok) {
-        throw new Error(`Failed to get session: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<{ session: ChatSession; messages: ChatMessage[] }>(`${API_BASE_URL}/sessions/${sessionId}`, {
+        cacheTtlMs: 700,
+        errorMessage: 'Failed to get session',
+      });
     } catch (error) {
       console.error('Get session failed:', error);
       throw error;
@@ -289,8 +357,10 @@ class ChatAPI {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(`Session chat error: ${errorData.error || response.statusText}`);
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Session chat failed:', error);
       throw error;
@@ -307,8 +377,10 @@ class ChatAPI {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(`Delete session error: ${errorData.error || response.statusText}`);
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Delete session failed:', error);
       throw error;
@@ -329,8 +401,10 @@ class ChatAPI {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(`Rename session error: ${errorData.error || response.statusText}`);
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Rename session failed:', error);
       throw error;
@@ -480,19 +554,17 @@ class ChatAPI {
 
   // ---------------- Models ----------------
   async getModels(): Promise<ModelsResponse> {
-    const resp = await fetch(`${API_BASE_URL}/models`);
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch models list: ${resp.status}`);
-    }
-    return resp.json();
+    return this.getJson<ModelsResponse>(`${API_BASE_URL}/models`, {
+      cacheTtlMs: 30000,
+      errorMessage: 'Failed to fetch models list',
+    });
   }
 
   async getSessionDocuments(sessionId: string): Promise<{ files: string[]; file_count: number; session: ChatSession }> {
-    const resp = await fetch(`${API_BASE_URL}/sessions/${sessionId}/documents`);
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch session documents: ${resp.status}`);
-    }
-    return resp.json();
+    return this.getJson<{ files: string[]; file_count: number; session: ChatSession }>(`${API_BASE_URL}/sessions/${sessionId}/documents`, {
+      cacheTtlMs: 1500,
+      errorMessage: 'Failed to fetch session documents',
+    });
   }
 
   // ---------- Index endpoints ----------
@@ -507,7 +579,9 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Create index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache('/indexes');
+    return payload;
   }
 
   async uploadFilesToIndex(indexId: string, files: File[]): Promise<{ message: string; uploaded_files: unknown[] }> {
@@ -518,7 +592,17 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Upload to index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/indexes/${indexId}`);
+    this.invalidateGetCache('/indexes');
+    return payload;
+  }
+
+  async getIndex(indexId: string): Promise<IndexSummary> {
+    return this.getJson<IndexSummary>(`${API_BASE_URL}/indexes/${indexId}`, {
+      cacheTtlMs: 1200,
+      errorMessage: 'Get index error',
+    });
   }
 
   async buildIndex(indexId: string, opts: { 
@@ -534,38 +618,96 @@ class ChatAPI {
     overviewModel?: string;
     batchSizeEmbed?: number;
     batchSizeEnrich?: number;
-  } = {}): Promise<{ message: string }> {
+  } = {}): Promise<IndexBuildResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/indexes/${indexId}/build`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          latechunk: opts.latechunk ?? false,
-          doclingChunk: opts.doclingChunk ?? false,
-          chunkSize: opts.chunkSize ?? 512,
-          chunkOverlap: opts.chunkOverlap ?? 64,
-          retrievalMode: opts.retrievalMode ?? 'hybrid',
-          windowSize: opts.windowSize ?? 2,
-          enableEnrich: opts.enableEnrich ?? true,
-          embeddingModel: opts.embeddingModel,
-          enrichModel: opts.enrichModel,
-          overviewModel: opts.overviewModel,
-          batchSizeEmbed: opts.batchSizeEmbed ?? 50,
-          batchSizeEnrich: opts.batchSizeEnrich ?? 25,
-        }),
+      const requestBody = JSON.stringify({ 
+        latechunk: opts.latechunk ?? false,
+        doclingChunk: opts.doclingChunk ?? false,
+        chunkSize: opts.chunkSize ?? 512,
+        chunkOverlap: opts.chunkOverlap ?? 64,
+        retrievalMode: opts.retrievalMode ?? 'hybrid',
+        windowSize: opts.windowSize ?? 2,
+        enableEnrich: opts.enableEnrich ?? true,
+        embeddingModel: opts.embeddingModel,
+        enrichModel: opts.enrichModel,
+        overviewModel: opts.overviewModel,
+        batchSizeEmbed: opts.batchSizeEmbed ?? 50,
+        batchSizeEnrich: opts.batchSizeEnrich ?? 25,
       });
 
-      if (!response.ok) {
+      const isTransientError = (msg: string) =>
+        /Connection aborted|ConnectionResetError|forcibly closed by the remote host|ECONNRESET|Failed to fetch|NetworkError/i.test(msg);
+
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const pollBuildStatus = async (): Promise<IndexBuildResponse> => {
+        const startedAt = Date.now();
+        const timeoutMs = 45 * 60 * 1000;
+
+        while (Date.now() - startedAt < timeoutMs) {
+          const index = await this.getIndex(indexId);
+          const metadata = (index.metadata ?? {}) as Record<string, unknown>;
+          const status = String(metadata.status ?? 'unknown');
+
+          if (status === 'functional' || status === 'ready' || status === 'completed') {
+            return { message: 'Index build completed.', index_id: indexId, status };
+          }
+
+          if (status === 'failed') {
+            const errorText = String(metadata.build_error ?? 'Unknown indexing failure');
+            throw new Error(`Build index error: ${errorText}`);
+          }
+
+          await wait(status === 'building' ? 2500 : 1200);
+        }
+
+        throw new Error('Build index error: polling timed out');
+      };
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        let response: Response;
+        try {
+          response = await fetch(`${API_BASE_URL}/indexes/${indexId}/build`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: requestBody,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (attempt < 2 && isTransientError(message)) {
+            await wait(1200);
+            continue;
+          }
+          throw error;
+        }
+
+        if (response.ok) {
+          const payload = await response.json().catch(() => ({} as IndexBuildResponse));
+          if (response.status === 202 || payload.status === 'building') {
+            return await pollBuildStatus();
+          }
+          return payload;
+        }
+
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(`Build index error: ${errorData.error || response.statusText}`);
+        const message = String(errorData.error || response.statusText || 'Unknown error');
+        if (attempt < 2 && isTransientError(message)) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+
+        throw new Error(`Build index error: ${message}`);
       }
 
-      return await response.json();
+      throw new Error('Build index error: transient retry attempts exhausted');
     } catch (error) {
       console.error('Build index failed:', error);
       throw error;
+    } finally {
+      this.invalidateGetCache(`/indexes/${indexId}`);
+      this.invalidateGetCache('/indexes');
     }
   }
 
@@ -575,22 +717,26 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Link index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/sessions/${sessionId}`);
+    this.invalidateGetCache(`/sessions/${sessionId}/indexes`);
+    this.invalidateGetCache('/sessions');
+    return payload;
   }
 
   async listIndexes(): Promise<IndexListResponse> {
-    const resp = await fetch(`${API_BASE_URL}/indexes`);
-    if (!resp.ok) {
-      throw new Error(`Failed to list indexes: ${resp.status}`);
-    }
-    const payload = await resp.json();
+    const payload = await this.getJson<unknown>(`${API_BASE_URL}/indexes`, {
+      cacheTtlMs: 2500,
+      errorMessage: 'Failed to list indexes',
+    });
     return this.normalizeIndexListResponse(payload);
   }
 
   async getSessionIndexes(sessionId: string): Promise<IndexListResponse> {
-    const resp = await fetch(`${API_BASE_URL}/sessions/${sessionId}/indexes`);
-    if (!resp.ok) throw new Error(`Failed to get session indexes: ${resp.status}`);
-    const payload = await resp.json();
+    const payload = await this.getJson<unknown>(`${API_BASE_URL}/sessions/${sessionId}/indexes`, {
+      cacheTtlMs: 1200,
+      errorMessage: 'Failed to get session indexes',
+    });
     return this.normalizeIndexListResponse(payload);
   }
 
@@ -602,7 +748,11 @@ class ChatAPI {
       const data = await resp.json().catch(() => ({ error: 'Unknown error'}));
       throw new Error(data.error || `Failed to delete index: ${resp.status}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/indexes/${indexId}`);
+    this.invalidateGetCache('/indexes');
+    this.invalidateGetCache('/sessions');
+    return payload;
   }
 
   // -------------------- Streaming (SSE-over-fetch) --------------------

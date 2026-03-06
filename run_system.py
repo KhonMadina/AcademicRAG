@@ -476,7 +476,8 @@ class ServiceManager:
                 
                 for service_name, process in list(self.processes.items()):
                     if process.poll() is not None:
-                        self.logger.warning(f"  {service_name} has stopped unexpectedly")
+                        exit_code = process.returncode
+                        self.logger.warning(f"  {service_name} has stopped unexpectedly (exit code: {exit_code})")
                         
                         # Restart the service
                         config = self.services[service_name]

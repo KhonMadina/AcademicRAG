@@ -150,7 +150,7 @@ export default function IndexPicker({ onSelect, onClose }: Props) {
   }, [menuOpenId]);
 
   return (
-    <div className="fixed inset-0  backdrop-blur-sm flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 backdrop-blur-sm flex items-center justify-center z-50 p-4">
       <div className="bg-white/80 backdrop-blur rounded-xl w-full max-w-xl max-h-full overflow-y-auto p-6 space-y-6 border border-black/20 shadow-2xl">
         <h2 className="text-lg font-semibold">Select an index</h2>
         <input

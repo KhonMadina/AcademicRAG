@@ -58,7 +58,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
       case 'toggle':
         return (
           <div key={opt.label} className="flex items-center justify-between">
-            <span className="text-sm text-gray-300 flex items-center gap-1 whitespace-nowrap">
+            <span className="text-sm  flex items-center gap-1 whitespace-nowrap">
               {displayName(opt.label)}
               {optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}
             </span>
@@ -70,8 +70,8 @@ export function ChatSettingsModal({ options, onClose }: Props) {
         return (
           <div key={opt.label} className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-300 flex items-center gap-1">{displayName(opt.label)}{optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}</span>
-              <span className="text-sm text-gray-400">
+              <span className="text-sm flex items-center gap-1">{displayName(opt.label)}{optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}</span>
+              <span className="text-sm ">
                 {opt.value}{opt.unit || ''}
               </span>
             </div>

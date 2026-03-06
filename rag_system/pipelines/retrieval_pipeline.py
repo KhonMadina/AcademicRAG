@@ -587,6 +587,151 @@ ORIGINAL QUESTION: "{query}"
         finally:
             self._chunk_window_cache.clear()
 
+    def diagnose_retrieval(
+        self,
+        query: str,
+        table_name: str = None,
+        *,
+        retrieval_k: Optional[int] = None,
+        pre_rerank_k: int = 10,
+        post_rerank_k: int = 10,
+        search_type: Optional[str] = None,
+        dense_weight: Optional[float] = None,
+        apply_ai_rerank: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        def _clean_score(value):
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return None
+            if isinstance(value, (np.floating,)):
+                try:
+                    cast = float(value)
+                    if math.isnan(cast) or math.isinf(cast):
+                        return None
+                    return cast
+                except Exception:
+                    return None
+            return value
+
+        def _diag_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+            metadata = doc.get("metadata")
+            if isinstance(metadata, str):
+                metadata = self._parse_metadata_payload(metadata)
+            elif not isinstance(metadata, dict):
+                metadata = {}
+
+            text = str(doc.get("text") or "")
+            if len(text) > 400:
+                text = text[:400] + "..."
+
+            return {
+                "chunk_id": doc.get("chunk_id"),
+                "document_id": doc.get("document_id") or metadata.get("document_id"),
+                "chunk_index": doc.get("chunk_index"),
+                "score": _clean_score(doc.get("score")),
+                "bm25": _clean_score(doc.get("bm25")),
+                "distance": _clean_score(doc.get("_distance")),
+                "rerank_score": _clean_score(doc.get("rerank_score")),
+                "title": metadata.get("title") or metadata.get("document_title"),
+                "text": text,
+            }
+
+        active_table = table_name or self.storage_config.get("text_table_name")
+        if not active_table:
+            raise ValueError("No table_name available for diagnostics.")
+
+        retrieval_k = max(1, int(retrieval_k or self.config.get("retrieval_k", 10)))
+        pre_rerank_k = max(1, int(pre_rerank_k))
+        post_rerank_k = max(1, int(post_rerank_k))
+
+        dense_retriever = self._get_dense_retriever()
+        if dense_retriever is None:
+            return {
+                "query": query,
+                "table_name": active_table,
+                "retrieval": {
+                    "search_type": search_type or self.retriever_configs.get("search_type", "hybrid"),
+                    "dense_weight": dense_weight,
+                    "retrieval_k": retrieval_k,
+                    "pre_rerank": [],
+                    "post_rerank": [],
+                    "ai_rerank_applied": False,
+                    "retrieved_count": 0,
+                },
+            }
+
+        selected_search_type = (search_type or self.retriever_configs.get("search_type") or "hybrid").lower()
+        selected_dense_weight = dense_weight
+        if selected_dense_weight is None:
+            selected_dense_weight = float(
+                self.retriever_configs.get("dense", {}).get(
+                    "weight", self.config.get("fusion", {}).get("vec_weight", 0.5)
+                )
+            )
+        selected_dense_weight = min(max(float(selected_dense_weight), 0.0), 1.0)
+
+        dense_retriever.fusion_config["search_type"] = selected_search_type
+        dense_retriever.fusion_config["vec_weight"] = selected_dense_weight
+        dense_retriever.fusion_config["bm25_weight"] = 1.0 - selected_dense_weight
+
+        retrieved_docs = dense_retriever.retrieve(
+            text_query=query,
+            table_name=active_table,
+            k=retrieval_k,
+            reranker=self._get_reranker(),
+            search_type=selected_search_type,
+        )
+
+        pre_docs = [_diag_doc(doc) for doc in retrieved_docs[:pre_rerank_k]]
+
+        ai_rerank_enabled = self.config.get("reranker", {}).get("enabled", False)
+        if apply_ai_rerank is not None:
+            ai_rerank_enabled = bool(apply_ai_rerank)
+
+        reranked_docs = list(retrieved_docs)
+        ai_rerank_applied = False
+        if ai_rerank_enabled and retrieved_docs:
+            ai_reranker = self._get_ai_reranker()
+            if ai_reranker:
+                ai_rerank_applied = True
+                top_k = min(max(post_rerank_k, 1), len(retrieved_docs))
+                strategy = self.config.get("reranker", {}).get("strategy", "qwen")
+                if strategy == "rerankers-lib":
+                    texts = [doc["text"] for doc in retrieved_docs]
+                    with _rerank_lock:
+                        ranked = ai_reranker.rank(query=query, docs=texts)
+                    try:
+                        pairs = [(r.score, r.document.doc_id) for r in ranked.results]
+                        if any(pair[1] is None for pair in pairs):
+                            pairs = [(r.score, i) for i, r in enumerate(ranked.results)]
+                    except Exception:
+                        pairs = ranked
+                    pairs = pairs[:top_k]
+                    reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+                else:
+                    if hasattr(ai_reranker, "rerank"):
+                        reranked_docs = ai_reranker.rerank(query, retrieved_docs, top_k=top_k)
+                    else:
+                        texts = [doc["text"] for doc in retrieved_docs]
+                        pairs = ai_reranker.rank(query, texts, top_k=top_k)
+                        reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+
+        post_docs = [_diag_doc(doc) for doc in reranked_docs[:post_rerank_k]]
+
+        return {
+            "query": query,
+            "table_name": active_table,
+            "retrieval": {
+                "search_type": selected_search_type,
+                "dense_weight": selected_dense_weight,
+                "retrieval_k": retrieval_k,
+                "pre_rerank": pre_docs,
+                "post_rerank": post_docs,
+                "ai_rerank_applied": ai_rerank_applied,
+                "retrieved_count": len(retrieved_docs),
+                "post_rerank_count": len(reranked_docs),
+            },
+        }
+
     # ------------------------------------------------------------------
     # Public utility
     # ------------------------------------------------------------------

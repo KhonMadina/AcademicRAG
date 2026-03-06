@@ -9,6 +9,8 @@ from rag_system.indexing.graph_extractor import GraphExtractor
 from rag_system.utils.ollama_client import OllamaClient
 from rag_system.indexing.contextualizer import ContextualEnricher
 from rag_system.indexing.overview_builder import OverviewBuilder
+import psutil
+import psutil
 
 class IndexingPipeline:
     def __init__(self, config: Dict[str, Any], ollama_client: OllamaClient, ollama_config: Dict[str, str]):
@@ -62,6 +64,14 @@ class IndexingPipeline:
         self.replace_existing_documents = indexing_config.get("replace_existing_documents", True)
         self.max_safe_embedding_batch = int(os.getenv("RAG_MAX_EMBED_BATCH", "24"))
         self.max_safe_enrichment_batch = int(os.getenv("RAG_MAX_ENRICH_BATCH", "24"))
+        self.min_safe_embedding_batch = int(os.getenv("RAG_MIN_EMBED_BATCH", "4"))
+        self.min_safe_enrichment_batch = int(os.getenv("RAG_MIN_ENRICH_BATCH", "2"))
+        self.low_memory_threshold_mb = int(os.getenv("RAG_LOW_MEMORY_THRESHOLD_MB", "3072"))
+        self.target_memory_budget_mb = float(os.getenv("RAG_INDEXING_TARGET_MEM_MB", "1024"))
+        self.min_safe_embedding_batch = int(os.getenv("RAG_MIN_EMBED_BATCH", "4"))
+        self.min_safe_enrichment_batch = int(os.getenv("RAG_MIN_ENRICH_BATCH", "2"))
+        self.low_memory_threshold_mb = int(os.getenv("RAG_LOW_MEMORY_THRESHOLD_MB", "3072"))
+        self.target_memory_budget_mb = float(os.getenv("RAG_INDEXING_TARGET_MEM_MB", "1024"))
 
         # Treat dense retrieval as enabled by default unless explicitly disabled
         dense_cfg = retriever_configs.setdefault("dense", {})
@@ -133,7 +143,13 @@ class IndexingPipeline:
                 print(f"  Failed to initialise LateChunkEncoder: {e}. Disabling latechunk retrieval.")
                 self.latechunk_enabled = False
 
-    def run(self, file_paths: List[str] | None = None, *, documents: List[str] | None = None):
+    def run(
+        self,
+        file_paths: List[str] | None = None,
+        *,
+        documents: List[str] | None = None,
+        progress_callback=None,
+    ):
         """
         Processes and indexes documents based on the pipeline's configuration.
         Accepts legacy keyword *documents* as an alias for *file_paths* so that
@@ -146,6 +162,7 @@ class IndexingPipeline:
             raise TypeError("IndexingPipeline.run() expects 'file_paths' (or alias 'documents') argument")
 
         print(f"--- Starting indexing process for {len(file_paths)} files. ---")
+        self._emit_progress(progress_callback, "parsing", 5.0, {"files_total": len(file_paths)})
         
         # Import progress tracking utilities
         from rag_system.utils.batch_processor import timer, ProgressTracker, estimate_memory_usage
@@ -157,7 +174,7 @@ class IndexingPipeline:
             with timer("Document Processing & Chunking"):
                 file_tracker = ProgressTracker(len(file_paths), "Document Processing")
                 
-                for file_path in file_paths:
+                for file_index, file_path in enumerate(file_paths, start=1):
                     try:
                         document_id = os.path.basename(file_path)
                         print(f"Processing: {document_id}")
@@ -193,6 +210,19 @@ class IndexingPipeline:
                         doc_chunks_map[document_id] = file_chunks  # save for late-chunk step
                         print(f"  Generated {len(file_chunks)} chunks from {document_id}")
                         file_tracker.update(1)
+
+                        parse_progress = 5.0 + ((file_index / max(1, len(file_paths))) * 40.0)
+                        self._emit_progress(
+                            progress_callback,
+                            "parsing",
+                            parse_progress,
+                            {
+                                "files_processed": file_index,
+                                "files_total": len(file_paths),
+                                "current_file": document_id,
+                                "chunks_total": len(all_chunks),
+                            },
+                        )
                         
                     except Exception as e:
                         print(f"   Error processing {file_path}: {e}")
@@ -202,6 +232,7 @@ class IndexingPipeline:
                 file_tracker.finish()
 
             if not all_chunks:
+                self._emit_progress(progress_callback, "failed", 100.0, {"error": "No chunks generated"})
                 print("No text chunks were generated. Skipping indexing.")
                 return
 
@@ -209,22 +240,7 @@ class IndexingPipeline:
             memory_mb = estimate_memory_usage(all_chunks)
             print(f" Estimated memory usage: {memory_mb:.1f}MB")
 
-            # Auto-clamp batch sizes for stability on large indexing jobs.
-            if len(all_chunks) >= 48:
-                new_embed_batch = min(getattr(self.embedding_generator, "batch_size", self.embedding_batch_size), self.max_safe_embedding_batch) if hasattr(self, 'embedding_generator') else self.embedding_batch_size
-                if hasattr(self, 'embedding_generator') and getattr(self.embedding_generator, "batch_size", None) != new_embed_batch:
-                    old_val = self.embedding_generator.batch_size
-                    self.embedding_generator.batch_size = new_embed_batch
-                    self.embedding_batch_size = new_embed_batch
-                    print(f"  Auto-clamped embedding batch size for stability: {old_val} -> {new_embed_batch}")
-
-                if hasattr(self, 'contextual_enricher'):
-                    new_enrich_batch = min(getattr(self.contextual_enricher, "batch_size", self.enrichment_batch_size), self.max_safe_enrichment_batch)
-                    if getattr(self.contextual_enricher, "batch_size", None) != new_enrich_batch:
-                        old_val = self.contextual_enricher.batch_size
-                        self.contextual_enricher.batch_size = new_enrich_batch
-                        self.enrichment_batch_size = new_enrich_batch
-                        print(f"  Auto-clamped enrichment batch size for stability: {old_val} -> {new_enrich_batch}")
+            self._apply_memory_aware_batch_controls(all_chunks, estimated_chunk_memory_mb=memory_mb)
 
             retriever_configs = self.config.get("retrievers") or self.config.get("retrieval", {})
 
@@ -238,6 +254,7 @@ class IndexingPipeline:
             print(f"   Has enricher object: {hasattr(self, 'contextual_enricher')}")
             
             if hasattr(self, 'contextual_enricher') and enricher_enabled:
+                self._emit_progress(progress_callback, "enriching", 50.0, {"chunks_total": len(all_chunks)})
                 with timer("Contextual Enrichment"):
                     window_size = enricher_config.get("window_size", 1)
 
@@ -290,12 +307,20 @@ class IndexingPipeline:
 
             # Step 4: Create BM25 Index from enriched chunks (for consistency with vector index)
             if hasattr(self, 'vector_indexer') and hasattr(self, 'embedding_generator'):
+                self._emit_progress(progress_callback, "embedding", 65.0, {"chunks_total": len(all_chunks)})
                 with timer("Vector Embedding & Indexing"):
                     table_name = self.config["storage"].get("text_table_name") or retriever_configs.get("dense", {}).get("lancedb_table_name", "default_text_table")
                     print(f"\n--- Generating embeddings with {self.config.get('embedding_model_name')} ---")
                     
                     embeddings = self.embedding_generator.generate(all_chunks)
                     
+                    self._emit_progress(
+                        progress_callback,
+                        "storing",
+                        82.0,
+                        {"table_name": table_name, "vectors": len(embeddings)},
+                    )
+
                     print(f"\n--- Indexing {len(embeddings)} vectors into LanceDB table: {table_name} ---")
                     self.vector_indexer.index(
                         table_name,
@@ -391,6 +416,12 @@ class IndexingPipeline:
                     print(f" Knowledge graph saved successfully.")
                     
         print("\n---  Indexing Complete ---")
+        self._emit_progress(
+            progress_callback,
+            "done",
+            100.0,
+            {"files_total": len(file_paths), "chunks_total": len(all_chunks)},
+        )
         self._print_final_statistics(len(file_paths), len(all_chunks))
     
     def _print_final_statistics(self, num_files: int, num_chunks: int):
@@ -411,3 +442,149 @@ class IndexingPipeline:
             
         print(f"  Components: {', '.join(components)}")
         print(f"  Batch sizes: Embeddings={self.embedding_batch_size}, Enrichment={self.enrichment_batch_size}")
+
+    def _emit_progress(self, callback, stage: str, progress: float, details: Dict[str, Any] | None = None):
+        if not callback:
+            return
+        try:
+            callback(stage=stage, progress=max(0.0, min(100.0, float(progress))), details=details or {})
+        except Exception as e:
+            print(f"  Progress callback error at stage '{stage}': {e}")
+
+    def _get_available_memory_mb(self) -> float:
+        try:
+            vm = psutil.virtual_memory()
+            return float(vm.available) / (1024 * 1024)
+        except Exception:
+            return 4096.0
+
+    def _compute_memory_aware_batch_size(
+        self,
+        *,
+        current_batch: int,
+        min_batch: int,
+        max_batch: int,
+        pressure_ratio: float,
+    ) -> int:
+        bounded_current = max(min_batch, min(max_batch, int(current_batch)))
+        if pressure_ratio <= 1.0:
+            return bounded_current
+        scaled = int(max(min_batch, bounded_current / pressure_ratio))
+        return max(min_batch, min(max_batch, scaled))
+
+    def _apply_memory_aware_batch_controls(self, chunks: List[Dict[str, Any]], estimated_chunk_memory_mb: float):
+        available_mb = self._get_available_memory_mb()
+        budget_cap = max(256.0, available_mb * 0.45)
+        target_budget_mb = min(self.target_memory_budget_mb, budget_cap)
+        pressure_ratio = (estimated_chunk_memory_mb / target_budget_mb) if target_budget_mb > 0 else 1.0
+
+        print(
+            " Memory-aware tuning: "
+            f"available={available_mb:.0f}MB, "
+            f"target_budget={target_budget_mb:.0f}MB, "
+            f"pressure={pressure_ratio:.2f}x"
+        )
+
+        if hasattr(self, 'embedding_generator'):
+            current_embed_batch = getattr(self.embedding_generator, "batch_size", self.embedding_batch_size)
+            embed_batch = self._compute_memory_aware_batch_size(
+                current_batch=current_embed_batch,
+                min_batch=self.min_safe_embedding_batch,
+                max_batch=self.max_safe_embedding_batch,
+                pressure_ratio=pressure_ratio,
+            )
+            if embed_batch != current_embed_batch:
+                self.embedding_generator.batch_size = embed_batch
+                self.embedding_batch_size = embed_batch
+                print(f"  Adjusted embedding batch size: {current_embed_batch} -> {embed_batch}")
+
+        if hasattr(self, 'contextual_enricher'):
+            current_enrich_batch = getattr(self.contextual_enricher, "batch_size", self.enrichment_batch_size)
+            enrich_batch = self._compute_memory_aware_batch_size(
+                current_batch=current_enrich_batch,
+                min_batch=self.min_safe_enrichment_batch,
+                max_batch=self.max_safe_enrichment_batch,
+                pressure_ratio=pressure_ratio,
+            )
+            if enrich_batch != current_enrich_batch:
+                self.contextual_enricher.batch_size = enrich_batch
+                self.enrichment_batch_size = enrich_batch
+                print(f"  Adjusted enrichment batch size: {current_enrich_batch} -> {enrich_batch}")
+
+        if available_mb < self.low_memory_threshold_mb:
+            print(
+                f"  Low-memory mode active (available {available_mb:.0f}MB < {self.low_memory_threshold_mb}MB)."
+            )
+
+    def _get_available_memory_mb(self) -> float:
+        """Best-effort available RAM detection in MB."""
+        try:
+            vm = psutil.virtual_memory()
+            return float(vm.available) / (1024 * 1024)
+        except Exception:
+            return 4096.0
+
+    def _compute_memory_aware_batch_size(
+        self,
+        *,
+        current_batch: int,
+        min_batch: int,
+        max_batch: int,
+        pressure_ratio: float,
+    ) -> int:
+        """Compute safe batch size under memory pressure while preserving configured intent."""
+        bounded_current = max(min_batch, min(max_batch, int(current_batch)))
+        if pressure_ratio <= 1.0:
+            return bounded_current
+
+        # Scale down more aggressively as pressure increases.
+        # Example: ratio=2.0 halves the batch, ratio=4.0 quarters it.
+        scaled = int(max(min_batch, bounded_current / pressure_ratio))
+        return max(min_batch, min(max_batch, scaled))
+
+    def _apply_memory_aware_batch_controls(self, chunks: List[Dict[str, Any]], estimated_chunk_memory_mb: float):
+        """Tune embedding/enrichment batch sizes based on memory pressure."""
+        available_mb = self._get_available_memory_mb()
+        # Reserve headroom to avoid allocator spikes / transient peaks.
+        budget_cap = max(256.0, available_mb * 0.45)
+        target_budget_mb = min(self.target_memory_budget_mb, budget_cap)
+        pressure_ratio = (estimated_chunk_memory_mb / target_budget_mb) if target_budget_mb > 0 else 1.0
+
+        print(
+            " Memory-aware tuning: "
+            f"available={available_mb:.0f}MB, "
+            f"target_budget={target_budget_mb:.0f}MB, "
+            f"pressure={pressure_ratio:.2f}x"
+        )
+
+        if hasattr(self, 'embedding_generator'):
+            current_embed_batch = getattr(self.embedding_generator, "batch_size", self.embedding_batch_size)
+            embed_batch = self._compute_memory_aware_batch_size(
+                current_batch=current_embed_batch,
+                min_batch=self.min_safe_embedding_batch,
+                max_batch=self.max_safe_embedding_batch,
+                pressure_ratio=pressure_ratio,
+            )
+            if embed_batch != current_embed_batch:
+                self.embedding_generator.batch_size = embed_batch
+                self.embedding_batch_size = embed_batch
+                print(f"  Adjusted embedding batch size: {current_embed_batch} -> {embed_batch}")
+
+        if hasattr(self, 'contextual_enricher'):
+            current_enrich_batch = getattr(self.contextual_enricher, "batch_size", self.enrichment_batch_size)
+            enrich_batch = self._compute_memory_aware_batch_size(
+                current_batch=current_enrich_batch,
+                min_batch=self.min_safe_enrichment_batch,
+                max_batch=self.max_safe_enrichment_batch,
+                pressure_ratio=pressure_ratio,
+            )
+            if enrich_batch != current_enrich_batch:
+                self.contextual_enricher.batch_size = enrich_batch
+                self.enrichment_batch_size = enrich_batch
+                print(f"  Adjusted enrichment batch size: {current_enrich_batch} -> {enrich_batch}")
+
+        if available_mb < self.low_memory_threshold_mb:
+            print(
+                f"  Low-memory mode active (available {available_mb:.0f}MB < {self.low_memory_threshold_mb}MB)."
+            )
+

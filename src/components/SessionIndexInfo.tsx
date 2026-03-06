@@ -85,6 +85,45 @@ export default function SessionIndexInfo({ sessionId, onClose }: Props) {
   const isInferredMetadata = indexMeta?.metadata_source === 'lancedb_inspection';
   const indexStatus = indexMeta?.status;
 
+  const normalizeStatus = (value?: string): 'ready' | 'building' | 'failed' | 'unknown' => {
+    const normalized = String(value || '').toLowerCase();
+    if (['functional', 'ready', 'completed', 'done'].includes(normalized)) return 'ready';
+    if (['failed', 'error', 'incomplete', 'empty'].includes(normalized)) return 'failed';
+    if (['building', 'queued', 'parsing', 'enriching', 'embedding', 'storing', 'processing', 'created'].includes(normalized)) return 'building';
+    return 'unknown';
+  };
+
+  const statusTag = normalizeStatus(indexStatus);
+  const statusLabel = statusTag === 'ready' ? 'Ready' : statusTag === 'building' ? 'Building' : statusTag === 'failed' ? 'Failed' : 'Unknown';
+  const statusClasses =
+    statusTag === 'ready'
+      ? 'bg-green-900/20 text-green-300 border border-green-700/40'
+      : statusTag === 'building'
+        ? 'bg-yellow-900/20 text-yellow-300 border border-yellow-700/40'
+        : statusTag === 'failed'
+          ? 'bg-red-900/20 text-red-300 border border-red-700/40'
+          : 'bg-gray-900/20 text-gray-300 border border-gray-700/40';
+
+  const resolveLastUpdated = (): string | null => {
+    const candidates = [
+      session?.updated_at,
+      typeof indexMeta?.metadata_inferred_at === 'string' ? indexMeta.metadata_inferred_at : null,
+      typeof indexMeta?.created_at === 'string' ? indexMeta.created_at : null,
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const parsed = new Date(candidate);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toLocaleString();
+      }
+    }
+
+    return null;
+  };
+
+  const lastUpdated = resolveLastUpdated();
+
   const getStatusMessage = () => {
     if (!hasMetadata) {
       return {
@@ -163,7 +202,15 @@ export default function SessionIndexInfo({ sessionId, onClose }: Props) {
           <>
             <div>
               <span className="block text-xs uppercase tracking-wide  mb-1">Name</span>
-              <p className="text-sm">{session?.title}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm">{session?.title}</p>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${statusClasses}`}>
+                  {statusLabel}
+                </span>
+              </div>
+              {lastUpdated && (
+                <p className="text-xs text-gray-500 mt-1">Last updated: {lastUpdated}</p>
+              )}
             </div>
 
             {statusMessage && (

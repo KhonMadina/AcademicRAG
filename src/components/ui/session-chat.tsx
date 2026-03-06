@@ -210,7 +210,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
           }
         } catch (error) {
           console.error('Failed to create session:', error)
-          setError('Failed to create session')
+          setError(apiService.getActionableErrorMessage(error, 'chat'))
           return
         }
       }
@@ -235,7 +235,10 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
           setMessages(prev => [...prev, uploadMessage])
         } catch (error) {
           console.error(' Failed to upload files:', error)
-          const errorMessage = apiService.createMessage(' Failed to upload files. Please try again.', 'assistant')
+          const errorMessage = apiService.createMessage(
+            apiService.getActionableErrorMessage(error, 'upload'),
+            'assistant'
+          )
           setMessages(prev => [...prev, errorMessage])
         } finally {
           setIsLoading(false)
@@ -571,7 +574,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
 
     } catch (error) {
       console.error('Failed to send message:', error)
-      setError('Failed to send message')
+      setError(apiService.getActionableErrorMessage(error, 'chat'))
     } finally {
       setIsLoading(false)
     }
@@ -597,7 +600,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
     } catch (error) {
       console.error(' Failed to index documents:', error);
       const errorMessage = apiService.createMessage(
-        ' Failed to index documents. Please try again.',
+        apiService.getActionableErrorMessage(error, 'index'),
         'assistant'
       );
       setMessages(prev => [...prev, errorMessage]);

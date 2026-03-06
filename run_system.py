@@ -35,6 +35,8 @@ from typing import Dict, List, Optional, TextIO
 import logging
 from dataclasses import dataclass
 import psutil
+from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 @dataclass
 class ServiceConfig:
@@ -46,6 +48,20 @@ class ServiceConfig:
     health_check_path: str = "/health"
     startup_delay: int = 2
     required: bool = True
+
+
+@dataclass
+class RuntimeConfig:
+    ollama_host: str
+    backend_port: int
+    rag_api_port: int
+    frontend_port: int
+    generation_model: str
+    enrichment_model: str
+    database_path: str
+    vector_db_path: str
+    lancedb_path: str
+    rag_config_mode: str
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter with colors for different log levels and services."""
@@ -86,6 +102,7 @@ class ServiceManager:
     """Manages multiple system services with logging and health monitoring."""
     
     def __init__(self, mode: str = "dev", logs_dir: str = "logs"):
+        load_dotenv()
         self.mode = mode
         self.logs_dir = Path(logs_dir)
         self.logs_dir.mkdir(exist_ok=True)
@@ -96,6 +113,9 @@ class ServiceManager:
         
         # Setup logging
         self.setup_logging()
+
+        # Runtime configuration and validation
+        self.runtime_config, self.config_errors, self.config_warnings = self._load_runtime_config()
         
         # Service configurations
         self.services = self._get_service_configs()
@@ -103,6 +123,75 @@ class ServiceManager:
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _validate_port(self, env_name: str, default: int, errors: List[str]) -> int:
+        raw = os.getenv(env_name, str(default)).strip()
+        try:
+            port = int(raw)
+        except ValueError:
+            errors.append(f"{env_name} must be an integer, got '{raw}'")
+            return default
+        if not (1 <= port <= 65535):
+            errors.append(f"{env_name} must be between 1 and 65535, got {port}")
+            return default
+        return port
+
+    def _load_runtime_config(self):
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip()
+        parsed_host = urlparse(ollama_host)
+        if parsed_host.scheme not in ("http", "https") or not parsed_host.netloc:
+            errors.append("OLLAMA_HOST must be a valid http(s) URL, e.g. http://localhost:11434")
+
+        backend_port = self._validate_port("BACKEND_PORT", 8000, errors)
+        rag_api_port = self._validate_port("RAG_API_PORT", 8001, errors)
+        frontend_port = self._validate_port("FRONTEND_PORT", 3000, errors)
+
+        generation_model = os.getenv("GENERATION_MODEL", "gemma3:12b-cloud").strip()
+        enrichment_model = os.getenv("ENRICHMENT_MODEL", "gemma3:4b-cloud").strip()
+        rag_config_mode = os.getenv("RAG_CONFIG_MODE", "default").strip()
+        if rag_config_mode not in ("default", "fast"):
+            warnings.append(
+                f"RAG_CONFIG_MODE='{rag_config_mode}' is not a known mode (expected 'default' or 'fast')."
+            )
+
+        database_path = os.getenv("DATABASE_PATH", "./backend/chat_data.db").strip()
+        vector_db_path = os.getenv("VECTOR_DB_PATH", "./lancedb").strip()
+        lancedb_path = os.getenv("LANCEDB_PATH", vector_db_path).strip()
+
+        return RuntimeConfig(
+            ollama_host=ollama_host,
+            backend_port=backend_port,
+            rag_api_port=rag_api_port,
+            frontend_port=frontend_port,
+            generation_model=generation_model,
+            enrichment_model=enrichment_model,
+            database_path=database_path,
+            vector_db_path=vector_db_path,
+            lancedb_path=lancedb_path,
+            rag_config_mode=rag_config_mode,
+        ), errors, warnings
+
+    def _validate_runtime_config(self) -> bool:
+        if self.config_errors:
+            self.logger.error(" Invalid environment configuration:")
+            for err in self.config_errors:
+                self.logger.error(f"   - {err}")
+            self.logger.error(" Fix .env values and retry startup")
+            return False
+
+        for warning in self.config_warnings:
+            self.logger.warning(f"  {warning}")
+
+        self.logger.info(
+            " Runtime config loaded: "
+            f"backend={self.runtime_config.backend_port}, "
+            f"rag_api={self.runtime_config.rag_api_port}, "
+            f"frontend={self.runtime_config.frontend_port}"
+        )
+        return True
     
     def setup_logging(self):
         """Setup centralized logging with colors."""
@@ -124,32 +213,33 @@ class ServiceManager:
     
     def _get_service_configs(self) -> Dict[str, ServiceConfig]:
         """Define service configurations based on mode."""
+        npm_command = 'npm.cmd' if os.name == 'nt' else 'npm'
         base_configs = {
             'ollama': ServiceConfig(
                 name='ollama',
                 command=['ollama', 'serve'],
-                port=11434,
+                port=urlparse(self.runtime_config.ollama_host).port or 11434,
                 startup_delay=5,
                 required=True
             ),
             'rag-api': ServiceConfig(
                 name='rag-api',
                 command=[sys.executable, '-m', 'rag_system.api_server'],
-                port=8001,
+                port=self.runtime_config.rag_api_port,
                 startup_delay=3,
                 required=True
             ),
             'backend': ServiceConfig(
                 name='backend',
                 command=[sys.executable, 'backend/server.py'],
-                port=8000,
+                port=self.runtime_config.backend_port,
                 startup_delay=2,
                 required=True
             ),
             'frontend': ServiceConfig(
                 name='frontend',
-                command=['npm.cmd', 'run', 'dev' if self.mode == 'dev' else 'start'],
-                port=3000,
+                command=[npm_command, 'run', 'dev' if self.mode == 'dev' else 'start'],
+                port=self.runtime_config.frontend_port,
                 startup_delay=5,
                 required=False  # Optional in case Node.js not available
             )
@@ -187,6 +277,9 @@ class ServiceManager:
     def check_prerequisites(self) -> bool:
         """Check if all required tools are available."""
         self.logger.info(" Checking prerequisites...")
+
+        if not self._validate_runtime_config():
+            return False
         
         missing_tools = []
         
@@ -199,7 +292,8 @@ class ServiceManager:
             missing_tools.append('python')
         
         # Check Node.js (optional)
-        if not self._command_exists('npm.cmd'):
+        npm_command = 'npm.cmd' if os.name == 'nt' else 'npm'
+        if not self._command_exists(npm_command):
             self.logger.warning("  npm not found - frontend will be disabled")
             self.services['frontend'].required = False
         
@@ -342,6 +436,29 @@ class ServiceManager:
             return response.status_code == 200
         except:
             return False
+
+    def _service_probe(self, service_name: str, config: ServiceConfig):
+        base_url = f"http://localhost:{config.port}"
+        try:
+            live_resp = requests.get(f"{base_url}/health", timeout=5)
+            liveness = live_resp.status_code == 200
+        except requests.RequestException:
+            liveness = False
+
+        try:
+            ready_resp = requests.get(f"{base_url}/health/ready", timeout=5)
+            readiness = ready_resp.status_code == 200
+        except requests.RequestException:
+            readiness = False
+
+        return liveness, readiness
+
+    def _ollama_probe(self):
+        try:
+            resp = requests.get(f"{self.runtime_config.ollama_host.rstrip('/')}/api/tags", timeout=5)
+            return resp.status_code == 200
+        except requests.RequestException:
+            return False
     
     def start_all(self, skip_frontend: bool = False) -> bool:
         """Start all services in order."""
@@ -391,7 +508,8 @@ class ServiceManager:
     def _start_ollama(self) -> bool:
         """Special handling for Ollama startup."""
         # Check if Ollama is already running
-        if self.is_port_in_use(11434):
+        ollama_port = urlparse(self.runtime_config.ollama_host).port or 11434
+        if self.is_port_in_use(ollama_port):
             self.logger.info(" Ollama already running")
             self.ensure_models()
             return True
@@ -408,17 +526,26 @@ class ServiceManager:
         self.logger.info("")
         self.logger.info(" RAG System Started!")
         self.logger.info(" Services Status:")
-        
+
+        ollama_status = "Ready" if self._ollama_probe() else "Not Ready"
+        self.logger.info(f"    {'Ollama':<10}: {ollama_status:<10} {self.runtime_config.ollama_host}")
+
         for service_name, config in self.services.items():
-            if service_name in self.processes or self.is_port_in_use(config.port):
-                status = " Running"
-                url = f"http://localhost:{config.port}"
-                self.logger.info(f"    {service_name.capitalize():<10}: {status:<10} {url}")
+            if service_name == 'ollama':
+                continue
+            liveness, readiness = self._service_probe(service_name, config)
+            if liveness and readiness:
+                status = "Ready"
+            elif liveness and not readiness:
+                status = "Live"
             else:
-                self.logger.info(f"    {service_name.capitalize():<10}:  Stopped")
+                status = "Stopped"
+
+            url = f"http://localhost:{config.port}"
+            self.logger.info(f"    {service_name.capitalize():<10}: {status:<10} {url}")
         
         self.logger.info("")
-        self.logger.info(" Access your RAG system at: http://localhost:3000")
+        self.logger.info(f" Access your RAG system at: http://localhost:{self.runtime_config.frontend_port}")
         self.logger.info("")
         self.logger.info(" Useful commands:")
         self.logger.info("    Stop system:  Ctrl+C")
@@ -511,6 +638,8 @@ def main():
     try:
         if args.health:
             # Health check mode
+            if not manager._validate_runtime_config():
+                sys.exit(1)
             manager._print_status_summary()
             return
         

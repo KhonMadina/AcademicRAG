@@ -3,6 +3,7 @@ import json
 import time, asyncio, os
 import numpy as np
 import concurrent.futures
+import threading
 from cachetools import TTLCache, LRUCache
 from rag_system.utils.ollama_client import OllamaClient
 from rag_system.pipelines.retrieval_pipeline import RetrievalPipeline
@@ -34,6 +35,9 @@ class Agent:
         # If set to "session", semantic-cache hits will be restricted to the same chat session.
         # Otherwise (default "global") answers can be reused across sessions.
         self.cache_scope = self.pipeline_configs.get("cache_scope", "global")  # 'global' or 'session'
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_metrics_lock = threading.Lock()
         
         #  NEW: In-memory store for conversational history per session
         self.chat_histories: LRUCache = LRUCache(maxsize=100) # Stores history for 100 recent sessions
@@ -247,6 +251,28 @@ Respond with JSON: {{"category": "<your_choice>"}}
             'session_id': session_id
         }
 
+    def _record_cache_lookup(self, hit: bool):
+        with self._cache_metrics_lock:
+            if hit:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
+
+    def get_cache_metrics(self) -> Dict[str, Any]:
+        with self._cache_metrics_lock:
+            total = self._cache_hits + self._cache_misses
+            hit_rate = (self._cache_hits / total) if total else 0.0
+            return {
+                "semantic_cache": {
+                    "lookups": total,
+                    "hits": self._cache_hits,
+                    "misses": self._cache_misses,
+                    "hit_rate": round(hit_rate, 4),
+                    "scope": self.cache_scope,
+                    "threshold": self.semantic_cache_threshold,
+                }
+            }
+
     # ---------------- Public sync API (kept for backwards compatibility) --------------
     def run(self, query: str, table_name: str = None, session_id: str = None, compose_sub_answers: Optional[bool] = None, query_decompose: Optional[bool] = None, ai_rerank: Optional[bool] = None, context_expand: Optional[bool] = None, verify: Optional[bool] = None, retrieval_k: Optional[int] = None, context_window_size: Optional[int] = None, reranker_top_k: Optional[int] = None, search_type: Optional[str] = None, dense_weight: Optional[float] = None, max_retries: int = 1, event_callback: Optional[callable] = None) -> Dict[str, Any]:
         """Synchronous helper. If *event_callback* is supplied, important
@@ -341,11 +367,13 @@ Respond with JSON: {{"category": "<your_choice>"}}
                 cached_result = self._find_in_semantic_cache(query_embedding, session_id)
 
                 if cached_result:
+                    self._record_cache_lookup(hit=True)
                     # Update history even on cache hit
                     if session_id:
                         history.append({"query": query, "answer": cached_result.get('answer', 'Cached answer not found.')})
                         self.chat_histories[session_id] = history
                     return cached_result
+                self._record_cache_lookup(hit=False)
 
         if query_type == "direct_answer":
             print(f" ROUTING DEBUG: Executing DIRECT_ANSWER path")

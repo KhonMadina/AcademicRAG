@@ -1,6 +1,8 @@
 import requests
 import json
 import os
+import time
+import threading
 from typing import List, Dict, Optional
 
 class OllamaClient:
@@ -9,11 +11,78 @@ class OllamaClient:
             base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
+        self.session = requests.Session()
+
+        self.request_timeout = int(os.getenv("OLLAMA_REQUEST_TIMEOUT_SEC", "60"))
+        self.max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+        self.retry_backoff_sec = float(os.getenv("OLLAMA_RETRY_BACKOFF_SEC", "1.5"))
+        self.circuit_breaker_threshold = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_THRESHOLD", "5"))
+        self.circuit_breaker_reset_sec = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_RESET_SEC", "30"))
+
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
+        self._state_lock = threading.Lock()
+
+    def _is_circuit_open(self) -> bool:
+        with self._state_lock:
+            return time.time() < self._circuit_open_until
+
+    def _record_success(self):
+        with self._state_lock:
+            self._failure_count = 0
+            self._circuit_open_until = 0.0
+
+    def _record_failure(self):
+        with self._state_lock:
+            self._failure_count += 1
+            if self._failure_count >= self.circuit_breaker_threshold:
+                self._circuit_open_until = time.time() + self.circuit_breaker_reset_sec
+
+    def _request_with_resilience(self, method: str, endpoint: str, timeout: Optional[int] = None, **kwargs):
+        if self._is_circuit_open():
+            raise RuntimeError("Ollama circuit breaker is open. Please retry shortly.")
+
+        url = f"{self.api_url}/{endpoint.lstrip('/')}"
+        max_attempts = self.max_retries + 1
+        last_error = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    timeout=timeout or self.request_timeout,
+                    **kwargs,
+                )
+
+                if 500 <= response.status_code < 600:
+                    raise requests.exceptions.HTTPError(
+                        f"Transient Ollama server error: {response.status_code}",
+                        response=response,
+                    )
+
+                self._record_success()
+                return response
+
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
+                last_error = e
+                self._record_failure()
+
+                if attempt < max_attempts and not self._is_circuit_open():
+                    time.sleep(self.retry_backoff_sec * attempt)
+                    continue
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                self._record_failure()
+                break
+
+        raise RuntimeError(f"Ollama request failed after {max_attempts} attempts: {last_error}")
     
     def is_ollama_running(self) -> bool:
         """Check if Ollama server is running"""
         try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            response = self.session.get(f"{self.base_url}/api/tags", timeout=5)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
@@ -21,22 +90,24 @@ class OllamaClient:
     def list_models(self) -> List[str]:
         """Get list of available models"""
         try:
-            response = requests.get(f"{self.api_url}/tags")
+            response = self._request_with_resilience("GET", "tags", timeout=15)
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 return [model["name"] for model in models]
             return []
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"Error fetching models: {e}")
             return []
     
     def pull_model(self, model_name: str) -> bool:
         """Pull a model if not available"""
         try:
-            response = requests.post(
-                f"{self.api_url}/pull",
+            response = self._request_with_resilience(
+                "POST",
+                "pull",
                 json={"name": model_name},
-                stream=True
+                stream=True,
+                timeout=max(self.request_timeout, 300),
             )
             
             if response.status_code == 200:
@@ -50,7 +121,7 @@ class OllamaClient:
                             return True
                 return True
             return False
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"Error pulling model: {e}")
             return False
     
@@ -83,10 +154,11 @@ class OllamaClient:
             else:
                 payload["think"] = True
             
-            response = requests.post(
-                f"{self.api_url}/chat",
+            response = self._request_with_resilience(
+                "POST",
+                "chat",
                 json=payload,
-                timeout=60
+                timeout=self.request_timeout,
             )
             
             if response.status_code == 200:
@@ -105,7 +177,7 @@ class OllamaClient:
             else:
                 return f"Error: {response.status_code} - {response.text}"
                 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             return f"Connection error: {e}"
     
     def chat_stream(self, message: str, model: str = "llama3.2", conversation_history: List[Dict] = None, enable_thinking: bool = True):
@@ -136,11 +208,12 @@ class OllamaClient:
             else:
                 payload["think"] = True
             
-            response = requests.post(
-                f"{self.api_url}/chat",
+            response = self._request_with_resilience(
+                "POST",
+                "chat",
                 json=payload,
                 stream=True,
-                timeout=60
+                timeout=self.request_timeout,
             )
             
             if response.status_code == 200:
@@ -163,7 +236,7 @@ class OllamaClient:
             else:
                 yield f"Error: {response.status_code} - {response.text}"
                 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             yield f"Connection error: {e}"
 
 def main():

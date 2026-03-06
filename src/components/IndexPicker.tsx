@@ -14,6 +14,53 @@ type PickerIndex = IndexSummary & {
   name: string;
 };
 
+type NormalizedIndexStatus = 'ready' | 'building' | 'failed' | 'unknown';
+
+const resolveIndexStatus = (index: PickerIndex): NormalizedIndexStatus => {
+  const metadata = (index.metadata && typeof index.metadata === 'object') ? index.metadata as Record<string, unknown> : {};
+  const raw = String(index.status ?? metadata.status ?? '').toLowerCase();
+
+  if (['functional', 'ready', 'completed', 'done'].includes(raw)) return 'ready';
+  if (['failed', 'error', 'incomplete', 'empty'].includes(raw)) return 'failed';
+  if (['building', 'queued', 'parsing', 'enriching', 'embedding', 'storing', 'processing', 'created'].includes(raw)) return 'building';
+  return 'unknown';
+};
+
+const statusLabel = (status: NormalizedIndexStatus): string => {
+  if (status === 'ready') return 'Ready';
+  if (status === 'building') return 'Building';
+  if (status === 'failed') return 'Failed';
+  return 'Unknown';
+};
+
+const statusClassName = (status: NormalizedIndexStatus): string => {
+  if (status === 'ready') return 'bg-green-900/20 text-green-300 border border-green-700/40';
+  if (status === 'building') return 'bg-yellow-900/20 text-yellow-300 border border-yellow-700/40';
+  if (status === 'failed') return 'bg-red-900/20 text-red-300 border border-red-700/40';
+  return 'bg-gray-900/20 text-gray-300 border border-gray-700/40';
+};
+
+const resolveUpdatedAt = (index: PickerIndex): string | null => {
+  const metadata = (index.metadata && typeof index.metadata === 'object') ? index.metadata as Record<string, unknown> : {};
+  const candidates = [
+    index.updated_at,
+    typeof metadata.updated_at === 'string' ? metadata.updated_at : null,
+    typeof metadata.last_updated === 'string' ? metadata.last_updated : null,
+    typeof metadata.metadata_inferred_at === 'string' ? metadata.metadata_inferred_at : null,
+    index.created_at,
+  ];
+
+  for (const value of candidates) {
+    if (!value) continue;
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleString();
+    }
+  }
+
+  return null;
+};
+
 export default function IndexPicker({ onSelect, onClose }: Props) {
   const [indexes, setIndexes] = useState<PickerIndex[]>([]);
   const [loading, setLoading] = useState(true);
@@ -181,13 +228,27 @@ export default function IndexPicker({ onSelect, onClose }: Props) {
           <ul className="space-y-2">
             {filteredIndexes.map((idx) => (
               <li key={idx.id}>
+                {(() => {
+                  const normalizedStatus = resolveIndexStatus(idx);
+                  const updatedAtLabel = resolveUpdatedAt(idx);
+                  return (
                 <div className="relative group" data-index-menu-root="true">
                   <button
                     onClick={() => onSelect(idx.id)}
                     className="w-full px-4 py-3 bg-black/15 hover:bg-black/20 rounded transition flex justify-between items-center pr-10 hover:cursor-pointer"
                   >
-                    <span className="font-medium truncate max-w-[60%]">{idx.name}</span>
-                    <span className="text-xs">{idx.documents?.length || 0} files</span>
+                    <div className="min-w-0 pr-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-medium truncate max-w-[60%]">{idx.name}</span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full shrink-0 ${statusClassName(normalizedStatus)}`}>
+                          {statusLabel(normalizedStatus)}
+                        </span>
+                      </div>
+                      {updatedAtLabel && (
+                        <p className="text-[11px] text-gray-500 mt-1 truncate">Updated {updatedAtLabel}</p>
+                      )}
+                    </div>
+                    <span className="text-xs shrink-0">{idx.documents?.length || 0} files</span>
                   </button>
 
                   <button
@@ -224,6 +285,8 @@ export default function IndexPicker({ onSelect, onClose }: Props) {
                     </div>
                   )}
                 </div>
+                  );
+                })()}
               </li>
             ))}
             {filteredIndexes.length === 0 && (

@@ -91,6 +91,9 @@ export interface IndexSummary {
   index_id?: string;
   name: string;
   title?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
   documents?: IndexDocument[];
   metadata?: Record<string, unknown>;
   session?: ChatSession;
@@ -114,9 +117,134 @@ type StreamEvent = {
   data: Record<string, unknown>;
 };
 
+type ErrorContext = 'chat' | 'upload' | 'index' | 'stream' | 'generic';
+
+export class ApiServiceError extends Error {
+  status?: number;
+  errorCode?: string;
+  context: ErrorContext;
+  userMessage: string;
+
+  constructor(params: {
+    message: string;
+    context: ErrorContext;
+    status?: number;
+    errorCode?: string;
+    userMessage: string;
+  }) {
+    super(params.message);
+    this.name = 'ApiServiceError';
+    this.status = params.status;
+    this.errorCode = params.errorCode;
+    this.context = params.context;
+    this.userMessage = params.userMessage;
+  }
+}
+
 class ChatAPI {
   private inFlightGetRequests = new Map<string, Promise<unknown>>();
   private getResponseCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+  private buildActionableMessage(context: ErrorContext, status?: number, errorCode?: string, serverMessage?: string): string {
+    const normalizedMessage = String(serverMessage || '').toLowerCase();
+    const normalizedCode = String(errorCode || '').toLowerCase();
+
+    if (
+      normalizedMessage.includes('failed to fetch') ||
+      normalizedMessage.includes('networkerror') ||
+      normalizedMessage.includes('network error') ||
+      normalizedMessage.includes('econnreset') ||
+      normalizedMessage.includes('connection reset') ||
+      normalizedMessage.includes('forcibly closed')
+    ) {
+      return 'Connection issue detected. Verify the backend is running (`python run_system.py`), then retry.';
+    }
+
+    if (normalizedMessage.includes('ollama is not running') || normalizedCode === 'service_unavailable') {
+      return 'Model service is unavailable. Start Ollama, wait for readiness, then retry your request.';
+    }
+
+    if (status === 413 || normalizedMessage.includes('exceeds 50mb')) {
+      return 'Upload is too large. Reduce total file size below 50MB and upload again.';
+    }
+
+    if (normalizedMessage.includes('no files were uploaded') || normalizedMessage.includes('no files uploaded')) {
+      return 'No files were detected. Attach one or more supported files and retry upload.';
+    }
+
+    if (normalizedMessage.includes('no documents to index')) {
+      return 'No uploaded documents found. Upload files first, then run indexing.';
+    }
+
+    if (normalizedMessage.includes('session not found')) {
+      return 'This chat session is no longer available. Refresh and create or select another session.';
+    }
+
+    if (normalizedCode === 'invalid_json' || normalizedCode === 'invalid_request' || normalizedCode === 'validation_error' || status === 400) {
+      if (context === 'upload') {
+        return 'Upload request was invalid. Check selected files and try again.';
+      }
+      if (context === 'chat' || context === 'stream') {
+        return 'Message request was invalid. Edit your prompt/settings and try again.';
+      }
+      return 'Request was invalid. Review inputs and retry.';
+    }
+
+    if (status === 404) {
+      return 'Requested resource was not found. Refresh the page and retry.';
+    }
+
+    if (status === 503) {
+      return 'Service is temporarily unavailable. Wait a moment and retry.';
+    }
+
+    if (context === 'upload') {
+      return 'Upload failed. Check file format/size and retry.';
+    }
+    if (context === 'chat' || context === 'stream') {
+      return 'Message failed. Retry, and if this persists, verify backend and model services are healthy.';
+    }
+    if (context === 'index') {
+      return 'Indexing failed. Verify uploaded documents and service health, then retry.';
+    }
+    return 'Request failed. Please retry.';
+  }
+
+  private async createApiError(response: Response, context: ErrorContext, fallbackPrefix: string): Promise<ApiServiceError> {
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    const serverError = typeof payload.error === 'string' ? payload.error : response.statusText || 'Unknown error';
+    const errorCode = typeof payload.error_code === 'string' ? payload.error_code : undefined;
+    const message = `${fallbackPrefix}: ${serverError}`;
+    const userMessage = this.buildActionableMessage(context, response.status, errorCode, serverError);
+
+    return new ApiServiceError({
+      message,
+      context,
+      status: response.status,
+      errorCode,
+      userMessage,
+    });
+  }
+
+  private toApiError(error: unknown, context: ErrorContext, fallbackPrefix: string): ApiServiceError {
+    if (error instanceof ApiServiceError) {
+      return error;
+    }
+
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    return new ApiServiceError({
+      message: `${fallbackPrefix}: ${rawMessage}`,
+      context,
+      userMessage: this.buildActionableMessage(context, undefined, undefined, rawMessage),
+    });
+  }
+
+  public getActionableErrorMessage(error: unknown, context: ErrorContext = 'generic'): string {
+    if (error instanceof ApiServiceError && error.userMessage) {
+      return error.userMessage;
+    }
+    return this.toApiError(error, context, 'Request failed').userMessage;
+  }
 
   private async getJson<T>(
     url: string,
@@ -354,8 +482,7 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(`Session chat error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'chat', 'Session chat error');
       }
       const payload = await response.json();
       this.invalidateGetCache('/sessions');
@@ -363,7 +490,7 @@ class ChatAPI {
       return payload;
     } catch (error) {
       console.error('Session chat failed:', error);
-      throw error;
+      throw this.toApiError(error, 'chat', 'Session chat error');
     }
   }
 
@@ -443,13 +570,12 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
-        throw new Error(`Upload error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'upload', 'Upload error');
       }
       return await response.json();
     } catch (error) {
       console.error('File upload failed:', error);
-      throw error;
+      throw this.toApiError(error, 'upload', 'Upload error');
     }
   }
 
@@ -463,13 +589,12 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Indexing failed' }));
-        throw new Error(`Indexing error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'index', 'Indexing error');
       }
       return await response.json();
     } catch (error) {
       console.error('Indexing failed:', error);
-      throw error;
+      throw this.toApiError(error, 'index', 'Indexing error');
     }
   }
 
@@ -805,7 +930,10 @@ class ChatAPI {
     });
 
     if (!resp.ok || !resp.body) {
-      throw new Error(`Stream request failed: ${resp.status}`);
+      if (!resp.ok) {
+        throw await this.createApiError(resp, 'stream', 'Stream request failed');
+      }
+      throw this.toApiError(new Error(`Missing stream body: ${resp.status}`), 'stream', 'Stream request failed');
     }
 
     const reader = resp.body.getReader();

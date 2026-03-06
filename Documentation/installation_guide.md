@@ -120,10 +120,15 @@ curl http://localhost:11434/api/tags
 # Start all components with one command
 python run_system.py
 
+# Optional launcher utilities
+python run_system.py --health
+python run_system.py --no-frontend
+
 # Or start components manually in separate terminals:
-# Terminal 1: python -m rag_system.api_server
-# Terminal 2: cd backend && python server.py  
-# Terminal 3: npm run dev
+# Terminal 1: ollama serve
+# Terminal 2: python -m rag_system.api_server
+# Terminal 3: cd backend && python server.py  
+# Terminal 4: npm run dev
 ```
 
 ### 4.3 Test Direct Development
@@ -135,7 +140,9 @@ python system_health_check.py
 # Test endpoints
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 
 # Access the application
 open http://localhost:3000
@@ -210,8 +217,10 @@ python system_health_check.py
 # Universal health check
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
 curl -f http://localhost:11434/api/tags && echo " Ollama OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 ```
 
 #### **RAG System Test:**

@@ -1,153 +1,158 @@
 #!/usr/bin/env python3
-"""
-Simple test script for the Academic RAG backend
-"""
+"""Automated integration tests for backend API endpoints."""
+
+import os
+import socket
+import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
 
 import requests
 
-def test_health_endpoint():
-    """Test the health endpoint"""
-    print(" Testing health endpoint...")
-    try:
-        response = requests.get("http://localhost:8000/health", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            print(f" Health check passed")
-            print(f"   Ollama running: {data['ollama_running']}")
-            print(f"   Models available: {len(data['available_models'])}")
-            return True
-        else:
-            print(f" Health check failed: {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        print(f" Health check failed: {e}")
-        return False
 
-def test_chat_endpoint():
-    """Test the chat endpoint"""
-    print("\n Testing chat endpoint...")
-    
-    test_message = {
-        "message": "Say 'Hello World' and nothing else.",
-        "model": "llama3.2:latest"
-    }
-    
-    try:
-        response = requests.post(
-            "http://localhost:8000/chat",
-            headers={"Content-Type": "application/json"},
-            json=test_message,
-            timeout=30
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return sock.getsockname()[1]
+
+
+class BackendApiIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.project_root = Path(__file__).resolve().parents[1]
+        cls.port = _find_free_port()
+        cls.base_url = f"http://127.0.0.1:{cls.port}"
+
+        env = os.environ.copy()
+        env["BACKEND_PORT"] = str(cls.port)
+
+        cls.server_process = subprocess.Popen(
+            [sys.executable, "backend/server.py"],
+            cwd=str(cls.project_root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
-        
-        if response.status_code == 200:
-            data = response.json()
-            print(f" Chat test passed")
-            print(f"   Model: {data['model']}")
-            print(f"   Response: {data['response']}")
-            print(f"   Message count: {data['message_count']}")
-            return True
-        else:
-            print(f" Chat test failed: {response.status_code}")
-            print(f"   Response: {response.text}")
-            return False
-            
-    except requests.exceptions.RequestException as e:
-        print(f" Chat test failed: {e}")
-        return False
 
-def test_conversation_history():
-    """Test conversation with history"""
-    print("\n  Testing conversation history...")
-    
-    # First message
-    conversation = []
-    
-    message1 = {
-        "message": "My name is Alice. Remember this.",
-        "model": "llama3.2:latest",
-        "conversation_history": conversation
-    }
-    
-    try:
-        response1 = requests.post(
-            "http://localhost:8000/chat",
-            headers={"Content-Type": "application/json"},
-            json=message1,
-            timeout=30
+        cls._wait_for_server_ready()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.server_process and cls.server_process.poll() is None:
+            cls.server_process.terminate()
+            try:
+                cls.server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.server_process.kill()
+                cls.server_process.wait(timeout=5)
+
+    @classmethod
+    def _wait_for_server_ready(cls):
+        deadline = time.time() + 40
+        last_error = None
+        while time.time() < deadline:
+            if cls.server_process.poll() is not None:
+                output = ""
+                if cls.server_process.stdout:
+                    output = cls.server_process.stdout.read()
+                raise RuntimeError(f"Backend server exited early. Output:\n{output}")
+            try:
+                resp = requests.get(f"{cls.base_url}/health", timeout=2)
+                if resp.status_code == 200:
+                    return
+            except requests.RequestException as e:
+                last_error = e
+            time.sleep(0.5)
+        raise RuntimeError(f"Backend server did not become ready in time: {last_error}")
+
+    def _assert_standard_error(self, payload: dict):
+        self.assertIn("success", payload)
+        self.assertFalse(payload["success"])
+        self.assertIn("error", payload)
+        self.assertIsInstance(payload["error"], str)
+        self.assertIn("error_code", payload)
+        self.assertIsInstance(payload["error_code"], str)
+
+    def test_liveness_endpoint(self):
+        response = requests.get(f"{self.base_url}/health", timeout=5)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("X-Request-ID", response.headers)
+        self.assertTrue(response.headers.get("X-Request-ID"))
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "ok")
+        self.assertEqual(payload.get("service"), "backend")
+        self.assertEqual(payload.get("check"), "liveness")
+
+    def test_not_found_uses_standard_error_schema(self):
+        response = requests.get(f"{self.base_url}/unknown-route", timeout=5)
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self._assert_standard_error(payload)
+        self.assertEqual(payload.get("error_code"), "not_found")
+
+    def test_create_and_list_sessions(self):
+        create_resp = requests.post(
+            f"{self.base_url}/sessions",
+            json={"title": "Test Session", "model": "gemma3:4b-cloud"},
+            timeout=5,
         )
-        
-        if response1.status_code == 200:
-            data1 = response1.json()
-            
-            # Add to conversation history
-            conversation.append({"role": "user", "content": "My name is Alice. Remember this."})
-            conversation.append({"role": "assistant", "content": data1["response"]})
-            
-            # Second message asking about the name
-            message2 = {
-                "message": "What is my name?",
-                "model": "llama3.2:latest", 
-                "conversation_history": conversation
-            }
-            
-            response2 = requests.post(
-                "http://localhost:8000/chat",
-                headers={"Content-Type": "application/json"},
-                json=message2,
-                timeout=30
-            )
-            
-            if response2.status_code == 200:
-                data2 = response2.json()
-                print(f" Conversation history test passed")
-                print(f"   First response: {data1['response']}")
-                print(f"   Second response: {data2['response']}")
-                
-                # Check if the AI remembered the name
-                if "alice" in data2['response'].lower():
-                    print(f" AI correctly remembered the name!")
-                else:
-                    print(f"  AI might not have remembered the name")
-                return True
-            else:
-                print(f" Second message failed: {response2.status_code}")
-                return False
-        else:
-            print(f" First message failed: {response1.status_code}")
-            return False
-            
-    except requests.exceptions.RequestException as e:
-        print(f" Conversation test failed: {e}")
-        return False
+        self.assertEqual(create_resp.status_code, 201)
+        create_data = create_resp.json()
 
-def main():
-    print(" Testing Academic RAG Backend")
-    print("=" * 40)
-    
-    # Test health endpoint
-    health_ok = test_health_endpoint()
-    if not health_ok:
-        print("\n Backend server is not running or not healthy")
-        print("   Make sure to run: python server.py")
-        return
-    
-    # Test basic chat
-    chat_ok = test_chat_endpoint()
-    if not chat_ok:
-        print("\n Chat functionality is not working")
-        return
-    
-    # Test conversation history
-    conversation_ok = test_conversation_history()
-    
-    print("\n" + "=" * 40)
-    if health_ok and chat_ok and conversation_ok:
-        print(" All tests passed! Backend is ready for frontend integration.")
-    else:
-        print("  Some tests failed. Check the issues above.")
-    
-    print("\n Ready to connect to frontend at http://localhost:3000")
+        self.assertIn("session_id", create_data)
+        self.assertIn("session", create_data)
+        session_id = create_data["session_id"]
+
+        list_resp = requests.get(f"{self.base_url}/sessions", timeout=5)
+        self.assertEqual(list_resp.status_code, 200)
+        list_data = list_resp.json()
+
+        self.assertIn("sessions", list_data)
+        self.assertIn("total", list_data)
+        self.assertTrue(any(s.get("id") == session_id for s in list_data["sessions"]))
+
+    def test_session_message_validation_error(self):
+        create_resp = requests.post(
+            f"{self.base_url}/sessions",
+            json={"title": "Validation Session", "model": "gemma3:4b-cloud"},
+            timeout=5,
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        session_id = create_resp.json()["session_id"]
+
+        msg_resp = requests.post(
+            f"{self.base_url}/sessions/{session_id}/messages",
+            json={"message": ""},
+            timeout=5,
+        )
+        self.assertEqual(msg_resp.status_code, 400)
+        payload = msg_resp.json()
+        self._assert_standard_error(payload)
+        self.assertEqual(payload.get("error_code"), "bad_request")
+
+    def test_rename_session_validation_error(self):
+        create_resp = requests.post(
+            f"{self.base_url}/sessions",
+            json={"title": "Rename Session", "model": "gemma3:4b-cloud"},
+            timeout=5,
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        session_id = create_resp.json()["session_id"]
+
+        rename_resp = requests.post(
+            f"{self.base_url}/sessions/{session_id}/rename",
+            json={"title": "   "},
+            timeout=5,
+        )
+        self.assertEqual(rename_resp.status_code, 400)
+        payload = rename_resp.json()
+        self._assert_standard_error(payload)
+        self.assertEqual(payload.get("error_code"), "bad_request")
+
 
 if __name__ == "__main__":
-    main() 
+    unittest.main(verbosity=2)

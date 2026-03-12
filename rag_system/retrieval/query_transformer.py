@@ -7,7 +7,12 @@ class QueryDecomposer:
         self.llm_client = llm_client
         self.llm_model = llm_model
 
-    def decompose(self, query: str, chat_history: List[Dict[str, Any]] | None = None) -> List[str]:
+    def decompose(
+        self,
+        query: str,
+        chat_history: List[Dict[str, Any]] | None = None,
+        max_sub_queries: int = 10,
+    ) -> List[str]:
         """Decompose *query* into standalone sub-queries.
 
         Parameters
@@ -280,13 +285,22 @@ Input payload:
 
             # Fallback: ensure at least the resolved_query if sub_queries empty
             if not sub_queries:
-                sub_queries = [data.get('resolved_query', query)]
+              sub_queries = [data.get('resolved_query', query)]
+
+            # Normalize and drop empty values
+            normalized_sub_queries: List[str] = []
+            for item in sub_queries:
+              text = str(item).strip()
+              if text:
+                normalized_sub_queries.append(text)
+            sub_queries = normalized_sub_queries or [query]
 
             # Deduplicate while preserving order
             sub_queries = list(dict.fromkeys(sub_queries))
 
-            # Enforce 10 sub-query limit per new requirements
-            return sub_queries[:10]
+            # Enforce configured sub-query limit
+            safe_limit = max(1, int(max_sub_queries or 1))
+            return sub_queries[:safe_limit]
         except json.JSONDecodeError:
             print(f"Failed to decode JSON from query decomposer: {response_text}")
             return [query]

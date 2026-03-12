@@ -145,8 +145,8 @@ def create_index_simple():
         config = PIPELINE_CONFIGS.get("default", {})
         ollama_client = OllamaClient()
         ollama_config = {
-            "generation_model": "gemma3:4b-cloud",
-            "embedding_model": "gemma3:4b-cloud"
+            "generation_model": "gemma3:12b-cloud",
+            "embedding_model": "nomic-embed-text:v1.5"
         }
         
         pipeline = IndexingPipeline(config, ollama_client, ollama_config)

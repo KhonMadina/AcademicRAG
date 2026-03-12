@@ -17,10 +17,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 from rag_system.main import get_agent
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if percentile <= 0:
+        return float(min(values))
+    if percentile >= 100:
+        return float(max(values))
+
+    ordered = sorted(float(v) for v in values)
+    rank = (len(ordered) - 1) * (percentile / 100.0)
+    low = int(rank)
+    high = min(low + 1, len(ordered) - 1)
+    fraction = rank - low
+    return ordered[low] * (1.0 - fraction) + ordered[high] * fraction
 
 
 def _safe_json_loads(raw: Any) -> Dict[str, Any]:
@@ -186,6 +203,7 @@ def evaluate(
     ai_rerank: bool = False,
     reranker_top_k: Optional[int] = None,
 ) -> Dict[str, Any]:
+    eval_started_at = time.perf_counter()
     agent = get_agent(mode)
     retrieval_pipeline = agent.retrieval_pipeline
 
@@ -222,6 +240,7 @@ def evaluate(
     total_scored = 0
     total_hits = 0
     reciprocal_rank_sum = 0.0
+    latency_ms: List[float] = []
     per_query: List[Dict[str, Any]] = []
 
     for row in eval_rows:
@@ -234,6 +253,7 @@ def evaluate(
         if not active_table:
             raise RuntimeError("No table name available. Provide --table-name or include table_name in eval rows.")
 
+        query_started_at = time.perf_counter()
         retrieved_docs = retriever.retrieve(
             text_query=query,
             table_name=active_table,
@@ -251,6 +271,8 @@ def evaluate(
                 ranked = ai_reranker.rank(query, texts, top_k=top_k)
                 reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in ranked]
             retrieved_docs = reranked_docs
+            query_latency_ms = (time.perf_counter() - query_started_at) * 1000.0
+            latency_ms.append(query_latency_ms)
 
         first_hit_rank = _find_first_match_rank(expected_docs, retrieved_docs, k)
         hit = first_hit_rank is not None
@@ -273,6 +295,7 @@ def evaluate(
                 "first_hit_rank": first_hit_rank,
                 "hit_at_k": hit,
                 "reciprocal_rank": rr,
+                "latency_ms": round(query_latency_ms, 2),
                 "top_k_doc_identifiers": top_doc_identifiers,
             }
         )
@@ -284,6 +307,8 @@ def evaluate(
 
     citation_hit_rate = (total_hits / total_scored) if total_scored else 0.0
     mrr_at_k = (reciprocal_rank_sum / total_scored) if total_scored else 0.0
+    total_eval_seconds = time.perf_counter() - eval_started_at
+    mean_latency_ms = (sum(latency_ms) / len(latency_ms)) if latency_ms else 0.0
 
     return {
         "summary": {
@@ -301,6 +326,11 @@ def evaluate(
             "citation_hit_rate_at_k": round(citation_hit_rate, 4),
             "retrieval_relevance_at_k": round(citation_hit_rate, 4),
             "mrr_at_k": round(mrr_at_k, 4),
+            "latency_ms_mean": round(mean_latency_ms, 2),
+            "latency_ms_p50": round(_percentile(latency_ms, 50), 2),
+            "latency_ms_p95": round(_percentile(latency_ms, 95), 2),
+            "latency_ms_max": round(max(latency_ms) if latency_ms else 0.0, 2),
+            "eval_duration_seconds": round(total_eval_seconds, 2),
         },
         "results": per_query,
     }
@@ -389,6 +419,13 @@ def main() -> None:
     print(f"citation_hit_rate@{summary['k']}={summary['citation_hit_rate_at_k']}")
     print(f"retrieval_relevance@{summary['k']}={summary['retrieval_relevance_at_k']}")
     print(f"mrr@{summary['k']}={summary['mrr_at_k']}")
+    print(
+        "latency_ms: "
+        f"mean={summary.get('latency_ms_mean')} "
+        f"p50={summary.get('latency_ms_p50')} "
+        f"p95={summary.get('latency_ms_p95')} "
+        f"max={summary.get('latency_ms_max')}"
+    )
     print(f"report={output_path}")
 
 

@@ -44,7 +44,7 @@ flowchart TD
 | `chunkSize` / `chunkOverlap` | Standard fixed slicing | 512 / 64 |
 | `enableEnrich` | Run contextual summaries | true |
 | `embeddingModel` | Override embedder | `Qwen/Qwen3-Embedding-0.6B` |
-| `overviewModel` | Model used in `OverviewBuilder` | `gemma3:4b-cloud` |
+| `overviewModel` | Model used in `OverviewBuilder` | `gemma3:12b-cloud` |
 | `batchSizeEmbed / Enrich` | Batch sizes | 50 / 25 |
 
 ## PDF Memory Guard (Docling OOM Protection)
@@ -308,7 +308,7 @@ def _generate_context_summary(self, chunk_text: str, surrounding_context: str) -
     
     response = self.llm_client.complete(
         prompt=prompt,
-        model=self.ollama_config["enrichment_model"]  # gemma3:4b-cloud
+        model=self.ollama_config["enrichment_model"]  # gemma3:12b-cloud
     )
     
     return response.strip()
@@ -324,7 +324,7 @@ def select_embedder(model_name: str, ollama_host: str = None):
         return QwenEmbedder(model_name=model_name)
     elif "bge-" in model_name:
         return BGEEmbedder(model_name=model_name)
-    elif ollama_host and model_name in ["nomic-embed-text"]:
+    elif ollama_host and model_name in ["nomic-embed-text:v1.5"]:
         return OllamaEmbedder(model_name=model_name, host=ollama_host)
     else:
         # Default to embedder
@@ -430,7 +430,7 @@ class OverviewBuilder:
         
         overview = self.llm_client.complete(
             prompt=overview_prompt,
-            model=self.overview_model  # gemma3:4b-cloud for speed
+            model=self.overview_model  # gemma3:12b-cloud for speed
         )
         
         return {
@@ -579,13 +579,13 @@ DEFAULT_CONFIG = {
     },
     "enrichment": {
         "enabled": True,
-        "model": "gemma3:4b-cloud",
+        "model": "gemma3:12b-cloud",
         "batch_size": 16
     },
     "overview": {
         "enabled": True,
         "max_chunks": 5,
-        "model": "gemma3:4b-cloud"
+        "model": "gemma3:12b-cloud"
     },
     "storage": {
         "create_index": True,
@@ -630,7 +630,7 @@ class IndexingPipeline:
 - DocLing-based PDF processing with OCR fallback
 - Multiple chunking strategies (DocLing, Recursive, Fixed-size)
 - Qwen3-Embedding-0.6B integration
-- Contextual enrichment with gemma3:4b-cloud
+- Contextual enrichment with gemma3:12b-cloud
 - LanceDB storage with vector indexing
 - Overview generation for query routing
 - Batch processing and parallel execution

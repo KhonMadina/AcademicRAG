@@ -97,7 +97,7 @@ For constrained hardware (<8GB free at runtime):
 
 ## 5. Model Footprint Guidance
 
-- Primary quality model (`gemma3:12b-cloud`) requires materially more RAM/compute than lightweight model (`gemma3:4b-cloud`).
+- Primary quality model (`gemma3:12b-cloud`) requires materially more RAM/compute than lightweight model (`gemma3:12b-cloud`).
 - If latency or memory pressure rises:
   1. switch generation to lighter model,
   2. reduce retrieval and reranker breadth,

@@ -49,7 +49,7 @@ class RetrievalPipelineSmokeTests(unittest.TestCase):
         }
         ollama_config = {
             "host": "http://localhost:11434",
-            "generation_model": "gemma3:4b-cloud",
+            "generation_model": "gemma3:12b-cloud",
         }
         return RetrievalPipeline(config, DummyOllamaClient(), ollama_config)
 

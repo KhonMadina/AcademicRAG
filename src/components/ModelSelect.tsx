@@ -20,11 +20,12 @@ export function ModelSelect({ value, onChange, type, className, placeholder }: P
       .getModels()
       .then((res: ModelsResponse) => {
         if (!mounted) return;
-        const list = type === 'generation' ? res.generation_models : res.embedding_models;
+        const rawList = type === 'generation' ? res.generation_models : res.embedding_models;
+        const list = Array.from(new Set(rawList.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)));
         setModels(list);
-        // Auto-select default gemma3:4b-cloud if available and not chosen yet
-        if(!value && list.includes('gemma3:4b-cloud')){
-          onChange('gemma3:4b-cloud');
+        // Auto-select default gemma3:12b-cloud if available and not chosen yet
+        if(!value && list.includes('gemma3:12b-cloud')){
+          onChange('gemma3:12b-cloud');
         }
         setLoading(false);
       })

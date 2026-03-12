@@ -52,6 +52,7 @@ def _score_key(candidate: Dict[str, Any]) -> tuple:
     return (
         float(candidate.get("retrieval_relevance_at_k", 0.0)),
         float(candidate.get("mrr_at_k", 0.0)),
+        -float(candidate.get("latency_ms_p95", 0.0)),
         -float(candidate.get("dense_weight") if candidate.get("dense_weight") is not None else 0.5),
     )
 
@@ -117,6 +118,7 @@ def tune(
     k: int,
     baseline: CandidateConfig,
     candidates: Sequence[CandidateConfig],
+    max_latency_regression_pct: float = 15.0,
 ) -> Dict[str, Any]:
     baseline_report = evaluate(
         eval_rows,
@@ -152,12 +154,26 @@ def tune(
     if not candidate_summaries:
         raise RuntimeError("No candidate summaries generated")
 
-    best_summary = max(candidate_summaries, key=_score_key)
+    baseline_p95 = float(baseline_summary.get("latency_ms_p95", 0.0))
+    allowed_max_p95 = baseline_p95 * (1.0 + max(0.0, float(max_latency_regression_pct)) / 100.0)
+
+    latency_safe_candidates = [
+        summary
+        for summary in candidate_summaries
+        if baseline_p95 <= 0.0 or float(summary.get("latency_ms_p95", 0.0)) <= allowed_max_p95
+    ]
+
+    best_summary = max(latency_safe_candidates or candidate_summaries, key=_score_key)
 
     baseline_rel = float(baseline_summary.get("retrieval_relevance_at_k", 0.0))
     best_rel = float(best_summary.get("retrieval_relevance_at_k", 0.0))
     baseline_mrr = float(baseline_summary.get("mrr_at_k", 0.0))
     best_mrr = float(best_summary.get("mrr_at_k", 0.0))
+    baseline_latency_p95 = float(baseline_summary.get("latency_ms_p95", 0.0))
+    best_latency_p95 = float(best_summary.get("latency_ms_p95", 0.0))
+    latency_regression_pct = 0.0
+    if baseline_latency_p95 > 0:
+        latency_regression_pct = ((best_latency_p95 - baseline_latency_p95) / baseline_latency_p95) * 100.0
 
     return {
         "baseline": baseline_summary,
@@ -165,6 +181,11 @@ def tune(
         "improvement": {
             "retrieval_relevance_delta": round(best_rel - baseline_rel, 4),
             "mrr_delta": round(best_mrr - baseline_mrr, 4),
+            "latency_p95_delta_ms": round(best_latency_p95 - baseline_latency_p95, 2),
+            "latency_p95_regression_pct": round(latency_regression_pct, 2),
+            "max_allowed_latency_regression_pct": round(max_latency_regression_pct, 2),
+            "within_latency_budget": baseline_latency_p95 <= 0.0 or best_latency_p95 <= allowed_max_p95,
+            "latency_safe_candidate_count": len(latency_safe_candidates),
             "improved": (best_rel > baseline_rel) or (best_rel == baseline_rel and best_mrr > baseline_mrr),
         },
         "candidates": candidate_summaries,
@@ -184,6 +205,12 @@ def main() -> None:
         "--reranker-top-k-values",
         default="5,10,15",
         help="Comma-separated top-k values for AI rerank (used only with --ai-rerank)",
+    )
+    parser.add_argument(
+        "--max-latency-regression-pct",
+        type=float,
+        default=15.0,
+        help="Maximum allowed p95 latency regression versus baseline when selecting best config",
     )
     parser.add_argument("--out", default=None, help="Output JSON path")
     args = parser.parse_args()
@@ -208,6 +235,7 @@ def main() -> None:
         k=max(1, int(args.k)),
         baseline=baseline,
         candidates=candidates,
+        max_latency_regression_pct=args.max_latency_regression_pct,
     )
 
     os.makedirs("eval/results", exist_ok=True)
@@ -242,7 +270,10 @@ def main() -> None:
     )
     print(
         f"delta: rel={improvement.get('retrieval_relevance_delta')} "
-        f"mrr={improvement.get('mrr_delta')} improved={improvement.get('improved')}"
+        f"mrr={improvement.get('mrr_delta')} "
+        f"latency_p95_ms={improvement.get('latency_p95_delta_ms')} "
+        f"within_budget={improvement.get('within_latency_budget')} "
+        f"improved={improvement.get('improved')}"
     )
     print(f"report={output_path}")
 

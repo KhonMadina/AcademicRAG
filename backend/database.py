@@ -576,8 +576,8 @@ class ChatDatabase:
                             dim_to_model = {
                                 384: 'BAAI/bge-small-en-v1.5 (or similar)',
                                 512: 'sentence-transformers/all-MiniLM-L6-v2 (or similar)',
-                                768: 'BAAI/bge-base-en-v1.5 (or similar)', 
-                                1024: 'Qwen/Qwen3-Embedding-0.6B (or similar)',
+                                768: 'nomic-embed-text:v1.5 (or similar)', 
+                                1024: 'large embedding model (or similar)',
                                 1536: 'text-embedding-ada-002 (or similar)'
                             }
                             if len(vector_data) in dim_to_model:

@@ -17,8 +17,8 @@
    
    # Install Ollama and models
    curl -fsSL https://ollama.ai/install.sh | sh
-   ollama pull gemma3:4b-cloud
    ollama pull gemma3:12b-cloud
+   ollama pull gemma3:27b-cloud
    ```
 
 2. **Verify Setup**

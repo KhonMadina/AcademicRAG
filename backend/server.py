@@ -38,6 +38,61 @@ import re
 
 _INDEX_BUILD_LOCK = threading.Lock()
 _ACTIVE_INDEX_BUILDS: set[str] = set()
+_MAX_HISTORY_MESSAGES = max(2, int(os.getenv("OLLAMA_MAX_HISTORY_MESSAGES", "12")))
+_RAG_CHAT_TIMEOUT_SEC = max(30, int(os.getenv("RAG_CHAT_TIMEOUT_SEC", "180")))
+_OVERVIEW_CACHE_TTL_SEC = max(5, int(os.getenv("OVERVIEW_CACHE_TTL_SEC", "120")))
+_OVERVIEW_CACHE_LOCK = threading.Lock()
+_OVERVIEW_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
+_CASUAL_DIRECT_PATTERNS = [
+    'hello', 'hi', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening',
+    'how are you', 'how do you do', 'nice to meet', 'pleasure to meet',
+    'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'talk to you later',
+    'test', 'testing', 'check', 'ping', 'just saying', 'nevermind',
+    'ok', 'okay', 'alright', 'got it', 'understood', 'i see'
+]
+_RAG_INDICATORS = [
+    'document', 'doc', 'file', 'pdf', 'text', 'content', 'page',
+    'according to', 'based on', 'mentioned', 'states', 'says',
+    'what does', 'summarize', 'summary', 'analyze', 'analysis',
+    'quote', 'citation', 'reference', 'source', 'evidence',
+    'explain from', 'extract', 'find in', 'search for'
+]
+_QUESTION_WORDS = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
+
+
+def _is_plain_conversational_message(message: str) -> bool:
+    normalized = " ".join(str(message or "").strip().lower().split())
+    if not normalized:
+        return True
+
+    return any(pattern in normalized for pattern in _CASUAL_DIRECT_PATTERNS)
+
+
+def _prepare_conversation_history(
+    conversation_history: List[Dict[str, Any]] | None,
+    latest_user_message: str,
+    max_messages: int = _MAX_HISTORY_MESSAGES,
+) -> List[Dict[str, str]]:
+    """Trim persisted history for faster follow-up turns and remove duplicated latest user prompts."""
+    latest_normalized = str(latest_user_message or "").strip()
+    prepared: List[Dict[str, str]] = []
+
+    for item in conversation_history or []:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        prepared.append({"role": role, "content": content})
+
+    if prepared and latest_normalized:
+        last_message = prepared[-1]
+        if last_message.get("role") == "user" and last_message.get("content", "").strip() == latest_normalized:
+            prepared.pop()
+
+    if max_messages > 0 and len(prepared) > max_messages:
+        prepared = prepared[-max_messages:]
+
+    return prepared
 
 
 class ServiceMetrics:
@@ -389,9 +444,11 @@ def _run_index_build_job(index_id: str, file_paths: List[str], table_name: str, 
         with _INDEX_BUILD_LOCK:
             _ACTIVE_INDEX_BUILDS.discard(index_id)
 
-#  Reusable TCPServer with address reuse enabled
-class ReusableTCPServer(socketserver.TCPServer):
+#  Reusable threaded TCPServer with address reuse enabled
+class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -535,7 +592,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             
             message = data.get('message', '')
-            model = data.get('model', 'llama3.2:latest')
+            model = data.get('model', 'gemma3:12b-cloud')
             conversation_history = data.get('conversation_history', [])
             
             if not message:
@@ -645,7 +702,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             
             title = data.get('title', 'New Chat')
-            model = data.get('model', 'llama3.2:latest')
+            model = data.get('model', 'gemma3:12b-cloud')
             
             session_id = db.create_session(title, model)
             session = db.get_session(session_id)
@@ -703,7 +760,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             else:
                 #  --- Use Direct LLM for General Queries (FAST) ---
                 print(f" Using direct LLM for general query: '{message[:50]}...'")
-                response_text, source_docs = self._handle_direct_llm_query(session_id, message, session)
+                response_text, source_docs = self._handle_direct_llm_query(session_id, message, session, data)
 
             # Add AI response to database
             ai_message_id = db.add_message(session_id, response_text, "assistant")
@@ -749,6 +806,10 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         if not idx_ids:
             return False
 
+        # Skip expensive overview routing for clearly conversational prompts.
+        if _is_plain_conversational_message(message):
+            return False
+
         # Load document overviews for intelligent routing
         try:
             doc_overviews = self._load_document_overviews(idx_ids)
@@ -769,6 +830,13 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         3. If none of the index files exist, fall back to the legacy global overview file.
         """
         import os, json
+
+        cache_key = tuple(sorted(str(idx) for idx in idx_ids if idx))
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            cached = _OVERVIEW_CACHE.get(cache_key)
+            if cached and now < cached[0]:
+                return list(cached[1])
 
         aggregated: list[str] = []
 
@@ -830,12 +898,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             print(f" Loaded {len(aggregated)} document overviews from {len(idx_ids)} index(es)")
         else:
             print(f" No overviews found for indices {idx_ids}")
-        return aggregated[:40]
+        limited = aggregated[:40]
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (time.time() + _OVERVIEW_CACHE_TTL_SEC, list(limited))
+        return limited
 
     def _route_using_overviews(self, query: str, overviews: List[str]) -> bool:
         """
          Use document overviews and LLM to make intelligent routing decisions.
-        
         Returns True if RAG should be used, False for direct LLM.
         """
         if not overviews:
@@ -876,7 +946,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             # Use Ollama to make the routing decision
             response = self.ollama_client.chat(
                 message=router_prompt,
-                model="gemma3:4b-cloud",  # Fast model for routing
+                model="gemma3:12b-cloud",  # Fast model for routing
                 enable_thinking=False  # Fast routing
             )
             
@@ -903,50 +973,29 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
          FALLBACK: Simple pattern-based routing (original logic).
         """
         message_lower = message.lower()
-        
-        # Always use Direct LLM for greetings and casual conversation
-        greeting_patterns = [
-            'hello', 'hi', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening',
-            'how are you', 'how do you do', 'nice to meet', 'pleasure to meet',
-            'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'talk to you later',
-            'test', 'testing', 'check', 'ping', 'just saying', 'nevermind',
-            'ok', 'okay', 'alright', 'got it', 'understood', 'i see'
-        ]
-        
-        # Check for greeting patterns
-        for pattern in greeting_patterns:
-            if pattern in message_lower:
-                return False  # Use Direct LLM for greetings
-        
-        # Keywords that strongly suggest document-related queries
-        rag_indicators = [
-            'document', 'doc', 'file', 'pdf', 'text', 'content', 'page',
-            'according to', 'based on', 'mentioned', 'states', 'says',
-            'what does', 'summarize', 'summary', 'analyze', 'analysis',
-            'quote', 'citation', 'reference', 'source', 'evidence',
-            'explain from', 'extract', 'find in', 'search for'
-        ]
-        
+
+        if _is_plain_conversational_message(message_lower):
+            return False
+
         # Check for strong RAG indicators
-        for indicator in rag_indicators:
+        for indicator in _RAG_INDICATORS:
             if indicator in message_lower:
                 return True
-        
+
         # Question words + substantial length might benefit from RAG
-        question_words = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
-        starts_with_question = any(message_lower.startswith(word) for word in question_words)
-        
+        starts_with_question = any(message_lower.startswith(word) for word in _QUESTION_WORDS)
+
         if starts_with_question and len(message) > 40:
             return True
-        
+
         # Very short messages - use direct LLM
         if len(message.strip()) < 20:
             return False
-        
+
         # Default to Direct LLM unless there's clear indication of document query
         return False
     
-    def _handle_direct_llm_query(self, session_id: str, message: str, session: dict):
+    def _handle_direct_llm_query(self, session_id: str, message: str, session: dict, data: dict):
         """
         Handle query using direct Ollama client with thinking disabled for speed.
         
@@ -955,11 +1004,14 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
         """
         try:
             # Get conversation history for context
-            conversation_history = db.get_conversation_history(session_id)
-            
+            conversation_history = _prepare_conversation_history(
+                db.get_conversation_history(session_id),
+                latest_user_message=message,
+            )
+
             # Use the session's model or default
-            model = session.get('model', 'gemma3:12b-cloud')  # Default to fast model
-            
+            model = data.get('model') or session.get('model_used') or session.get('model') or 'gemma3:27b-cloud'
+
             # Direct Ollama call with thinking disabled for speed
             response_text = self.ollama_client.chat(
                 message=message,
@@ -1023,6 +1075,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 rag_api_url,
                 json=payload,
                 headers={"X-Request-ID": str(getattr(self, "request_id", _resolve_request_id(None)))},
+                timeout=(10, _RAG_CHAT_TIMEOUT_SEC),
             )
             if rag_response.status_code == 200:
                 rag_data = rag_response.json()
@@ -1034,6 +1087,9 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
         except requests.exceptions.ConnectionError:
             response_text = "Could not connect to the RAG API server. Please ensure it is running."
             print(" Connection to RAG API failed (port 8001).")
+        except requests.exceptions.Timeout:
+            response_text = "The RAG API took too long to respond. Please retry your question."
+            print(f" RAG API timed out after {_RAG_CHAT_TIMEOUT_SEC}s.")
         except Exception as e:
             response_text = f"Error processing RAG query: {str(e)}"
             print(f" RAG processing error: {e}")
@@ -1154,7 +1210,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             
             # Get Ollama models if available
             if self.ollama_client.is_ollama_running():
-                all_ollama_models = self.ollama_client.list_models()
+                all_ollama_models = [m for m in self.ollama_client.list_models() if isinstance(m, str) and m.strip()]
                 
                 # Very naive classification - same logic as RAG API server
                 ollama_embedding_models = [m for m in all_ollama_models if any(k in m for k in ['embed','bge','embedding','text'])]
@@ -1165,15 +1221,14 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             
             # Add supported HuggingFace embedding models
             huggingface_embedding_models = [
-                "Qwen/Qwen3-Embedding-0.6B",
-                "Qwen/Qwen3-Embedding-4B", 
-                "Qwen/Qwen3-Embedding-8B"
+                "Qwen/Qwen3-Embedding-0.6B", 
+                "Qwen/Qwen3-Embedding-4B"
             ]
             embedding_models.extend(huggingface_embedding_models)
             
-            # Sort models for consistent ordering
-            generation_models.sort()
-            embedding_models.sort()
+            # De-duplicate and sort models for consistent ordering
+            generation_models = sorted(set(generation_models))
+            embedding_models = sorted(set(embedding_models))
             
             self.send_json_response({
                 "generation_models": generation_models,
@@ -1225,9 +1280,9 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     'chunk_overlap': 64,  # From default config
                     'retrieval_mode': 'hybrid',  # From default config
                     'window_size': 5,  # From default config
-                    'embedding_model': 'Qwen/Qwen3-Embedding-0.6B',  # From default config
-                    'enrich_model': 'gemma3:4b-cloud',  # From default config
-                    'overview_model': 'gemma3:4b-cloud',  # From default config
+                    'embedding_model': 'nomic-embed-text:v1.5',  # From default config
+                    'enrich_model': 'gemma3:12b-cloud',  # From default config
+                    'overview_model': 'gemma3:12b-cloud',  # From default config
                     'enable_enrich': True,  # From default config
                     'latechunk': True,  # From default config
                     'docling_chunk': True,  # From default config

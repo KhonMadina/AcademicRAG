@@ -28,13 +28,13 @@ from rag_system.utils.ollama_client import OllamaClient
 # Ollama Models Configuration (for inference via Ollama)
 OLLAMA_CONFIG = {
     "host": os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-    "generation_model": "gemma3:12b-cloud",  # Main text generation model
-    "enrichment_model": "gemma3:4b-cloud",  # Lightweight model for routing/enrichment
+    "generation_model": os.getenv("GENERATION_MODEL", "gemma3:27b-cloud"),  # Main text generation model
+    "enrichment_model": os.getenv("ENRICHMENT_MODEL", "gemma3:12b-cloud"),  # Lightweight model for routing/enrichment
 }
 
 # External Model Configuration (HuggingFace models used directly)
 EXTERNAL_MODELS = {
-    "embedding_model": "Qwen/Qwen3-Embedding-0.6B",  # HuggingFace embedding model (1024 dims - fresh start)
+    "embedding_model": os.getenv("EMBEDDING_MODEL", "nomic-embed-text:v1.5"),  # Default Ollama embedding model
     "reranker_model": "answerdotai/answerai-colbert-small-v1",  # ColBERT reranker
     "vision_model": "Qwen/Qwen-VL-Chat",  # Vision model for multimodal
     "fallback_reranker": "BAAI/bge-reranker-base",  # Backup reranker

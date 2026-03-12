@@ -201,7 +201,7 @@ ORIGINAL QUESTION: "{query}"
 
     response = self.llm_client.complete_stream(
         prompt=prompt,
-        model=self.ollama_config["generation_model"]  # gemma3:12b-cloud
+        model=self.ollama_config["generation_model"]  # gemini-3-flash-preview:cloud
     )
     
     for chunk in response:
@@ -236,7 +236,7 @@ class QueryDecomposer:
         
         response = self.llm_client.complete(
             prompt=decomposition_prompt,
-            model=self.enrichment_model  # gemma3:4b-cloud for speed
+            model=self.enrichment_model  # gemma3:12b-cloud for speed
         )
         
         # Parse response into list of sub-queries
@@ -553,7 +553,7 @@ RETRIEVAL_CONFIG = {
 MODEL_CONFIG = {
     "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
     "generation_model": "gemma3:12b-cloud",
-    "enrichment_model": "gemma3:4b-cloud",
+    "enrichment_model": "gemma3:12b-cloud",
     "reranker_model": "answerdotai/answerai-colbert-small-v1",
     "fallback_reranker": "BAAI/bge-reranker-base"
 }

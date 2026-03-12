@@ -149,8 +149,8 @@ class ServiceManager:
         rag_api_port = self._validate_port("RAG_API_PORT", 8001, errors)
         frontend_port = self._validate_port("FRONTEND_PORT", 3000, errors)
 
-        generation_model = os.getenv("GENERATION_MODEL", "gemma3:12b-cloud").strip()
-        enrichment_model = os.getenv("ENRICHMENT_MODEL", "gemma3:4b-cloud").strip()
+        generation_model = os.getenv("GENERATION_MODEL", "gemma3:27b-cloud").strip()
+        enrichment_model = os.getenv("ENRICHMENT_MODEL", "gemma3:12b-cloud").strip()
         rag_config_mode = os.getenv("RAG_CONFIG_MODE", "default").strip()
         if rag_config_mode not in ("default", "fast"):
             warnings.append(
@@ -317,7 +317,11 @@ class ServiceManager:
         """Ensure required Ollama models are available."""
         self.logger.info(" Checking required models...")
         
-        required_models = ['gemma3:12b-cloud', 'gemma3:4b-cloud']
+        required_models = [
+            self.runtime_config.generation_model,
+            self.runtime_config.enrichment_model,
+            os.getenv("EMBEDDING_MODEL", "nomic-embed-text:v1.5").strip(),
+        ]
         
         try:
             # Get list of installed models

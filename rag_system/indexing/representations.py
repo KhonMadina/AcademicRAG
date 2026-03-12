@@ -18,7 +18,7 @@ class QwenEmbedder(EmbeddingModel):
     """
     An embedding model that uses a local Hugging Face transformer model.
     """
-    def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B"):
+    def __init__(self, model_name: str = "nomic-embed-text:v1.5"):
         self.model_name = model_name
         # Auto-select the best available device: CUDA > MPS > CPU
         if torch.cuda.is_available():

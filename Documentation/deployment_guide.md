@@ -49,8 +49,8 @@ EMBEDDING_MODELS = [
 
 # Generation Models  
 GENERATION_MODELS = [
-    "gemma3:4b-cloud",  # Fast responses
-    "gemma3:12b-cloud",    # High quality
+    "gemma3:12b-cloud",  # Fast responses
+    "gemma3:27b-cloud",    # High quality
 ]
 ```
 
@@ -163,8 +163,8 @@ pkill ollama
 ollama serve
 
 # Reinstall models
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
 ```
 
 ### 7.2 Performance Issues
@@ -178,7 +178,7 @@ vm_stat           # macOS
 # Solutions:
 # 1. Increase system RAM
 # 2. Reduce batch sizes in configuration
-# 3. Use smaller models (gemma3:4b-cloud instead of gemma3:12b-cloud)
+# 3. Use smaller models (gemma3:12b-cloud instead of gemma3:12b-cloud)
 ```
 
 #### **Slow Response Times**

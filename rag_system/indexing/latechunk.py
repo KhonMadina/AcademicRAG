@@ -21,18 +21,14 @@ import numpy as np
 class LateChunkEncoder:
     """Generate late-chunked embeddings given character-offset spans."""
 
-    def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B", *, max_tokens: int = 8192) -> None:
+    def __init__(self, model_name: str = "nomic-embed-text:v1.5", *, max_tokens: int = 8192) -> None:
         self.model_name = model_name
         self.max_len = max_tokens
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Back-compat: allow short alias without repo namespace
         repo_id = model_name
-        if "/" not in model_name and not model_name.startswith("Qwen/"):
-            # map common alias to official repo
-            alias_map = {
-                "qwen3-embedding-0.6b": "Qwen/Qwen3-Embedding-0.6B",
-            }
-            repo_id = alias_map.get(model_name.lower(), model_name)
+        if "/" not in model_name:
+            repo_id = model_name
 
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
         self.model = AutoModel.from_pretrained(repo_id, trust_remote_code=True)

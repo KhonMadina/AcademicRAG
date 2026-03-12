@@ -22,8 +22,8 @@ This runbook is the minimum operational guide for starting, stopping, recovering
 
 1. Confirm Python and Node dependencies are installed.
 2. Confirm Ollama models are available:
-   - `gemma3:4b-cloud`
    - `gemma3:12b-cloud`
+   - `gemma3:27b-cloud`
 3. Confirm required paths are writable:
    - `logs/`, `backend/`, `lancedb/`, `index_store/`, `shared_uploads/`
 

@@ -27,8 +27,8 @@ test('happy path: create index then chat and render answer', async ({ page }) =>
 
     if (method === 'GET' && path === '/models') {
       return json({
-        generation_models: ['gemma3:12b-cloud', 'gemma3:4b-cloud'],
-        embedding_models: ['Qwen/Qwen3-Embedding-0.6B'],
+        generation_models: ['gemma3:27b-cloud', 'gemma3:12b-cloud'],
+        embedding_models: ['nomic-embed-text:v1.5'],
       });
     }
 
@@ -54,7 +54,7 @@ test('happy path: create index then chat and render answer', async ({ page }) =>
           title: 'E2E Index Session',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          model_used: 'gemma3:12b-cloud',
+          model_used: 'gemma3:27b-cloud',
           message_count: 0,
         },
       }, 201);
@@ -71,7 +71,7 @@ test('happy path: create index then chat and render answer', async ({ page }) =>
           title: 'E2E Index Session',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          model_used: 'gemma3:12b-cloud',
+          model_used: 'gemma3:27b-cloud',
           message_count: 1,
         },
         messages: [],
@@ -93,7 +93,7 @@ test('happy path: create index then chat and render answer', async ({ page }) =>
           title: 'E2E Index Session',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          model_used: 'gemma3:12b-cloud',
+          model_used: 'gemma3:27b-cloud',
           message_count: 2,
         },
         user_message_id: 'u-msg-1',

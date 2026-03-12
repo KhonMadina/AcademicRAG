@@ -14,7 +14,7 @@ interface Props {
   onIndexed?: (session: ChatSession) => void;
 }
 
-const DEFAULT_LLM = 'gemma3:4b-cloud';
+const DEFAULT_LLM = 'gemma3:12b-cloud';
 const DEFAULT_CHUNK_SIZE = 512;
 const DEFAULT_CHUNK_OVERLAP = 64;
 const DEFAULT_WINDOW_SIZE = 5;

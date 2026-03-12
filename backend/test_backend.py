@@ -97,7 +97,7 @@ class BackendApiIntegrationTests(unittest.TestCase):
     def test_create_and_list_sessions(self):
         create_resp = requests.post(
             f"{self.base_url}/sessions",
-            json={"title": "Test Session", "model": "gemma3:4b-cloud"},
+            json={"title": "Test Session", "model": "gemma3:12b-cloud"},
             timeout=5,
         )
         self.assertEqual(create_resp.status_code, 201)
@@ -118,7 +118,7 @@ class BackendApiIntegrationTests(unittest.TestCase):
     def test_session_message_validation_error(self):
         create_resp = requests.post(
             f"{self.base_url}/sessions",
-            json={"title": "Validation Session", "model": "gemma3:4b-cloud"},
+            json={"title": "Validation Session", "model": "gemma3:12b-cloud"},
             timeout=5,
         )
         self.assertEqual(create_resp.status_code, 201)
@@ -137,7 +137,7 @@ class BackendApiIntegrationTests(unittest.TestCase):
     def test_rename_session_validation_error(self):
         create_resp = requests.post(
             f"{self.base_url}/sessions",
-            json={"title": "Rename Session", "model": "gemma3:4b-cloud"},
+            json={"title": "Rename Session", "model": "gemma3:12b-cloud"},
             timeout=5,
         )
         self.assertEqual(create_resp.status_code, 201)

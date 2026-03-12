@@ -11,6 +11,7 @@ from rag_system.indexing.contextualizer import ContextualEnricher
 from rag_system.indexing.overview_builder import OverviewBuilder
 import psutil
 import psutil
+import time
 
 class IndexingPipeline:
     def __init__(self, config: Dict[str, Any], ollama_client: OllamaClient, ollama_config: Dict[str, str]):
@@ -34,7 +35,7 @@ class IndexingPipeline:
                 self.chunker = DoclingChunker(
                     max_tokens=config.get("max_tokens", chunk_size),
                     overlap=config.get("overlap_sentences", 1),
-                    tokenizer_model=config.get("embedding_model_name", "qwen3-embedding-0.6b"),
+                    tokenizer_model=config.get("embedding_model_name", "nomic-embed-text:v1.5"),
                 )
                 print(" Using DoclingChunker for high-recall sentence packing.")
             except Exception as e:
@@ -42,13 +43,13 @@ class IndexingPipeline:
                 self.chunker = MarkdownRecursiveChunker(
                     max_chunk_size=chunk_size,
                     min_chunk_size=min(chunk_overlap, chunk_size // 4),  # Sensible minimum
-                    tokenizer_model=config.get("embedding_model_name", "Qwen/Qwen3-Embedding-0.6B")
+                    tokenizer_model=config.get("embedding_model_name", "nomic-embed-text:v1.5")
                 )
         else:
             self.chunker = MarkdownRecursiveChunker(
                 max_chunk_size=chunk_size,
                 min_chunk_size=min(chunk_overlap, chunk_size // 4),  # Sensible minimum
-                tokenizer_model=config.get("embedding_model_name", "Qwen/Qwen3-Embedding-0.6B")
+                tokenizer_model=config.get("embedding_model_name", "nomic-embed-text:v1.5")
             )
 
         retriever_configs = dict(self.config.get("retrievers") or self.config.get("retrieval", {}))
@@ -91,7 +92,7 @@ class IndexingPipeline:
             self.lancedb_manager = LanceDBManager(db_path=db_path)
             self.vector_indexer = VectorIndexer(self.lancedb_manager)
             embedding_model = select_embedder(
-                self.config.get("embedding_model_name", "BAAI/bge-small-en-v1.5"),
+                self.config.get("embedding_model_name", "nomic-embed-text:v1.5"),
                 self.ollama_config.get("host") if isinstance(self.ollama_config, dict) else None,
             )
             self.embedding_generator = EmbeddingGenerator(
@@ -125,7 +126,7 @@ class IndexingPipeline:
         ov_path = self.config.get("overview_path")
         self.overview_builder = OverviewBuilder(
             llm_client=self.llm_client,
-            model=self.config.get("overview_model_name", self.ollama_config.get("enrichment_model", "gemma3:4b-cloud")),
+            model=self.config.get("overview_model_name", self.ollama_config.get("enrichment_model", "gemma3:12b-cloud")),
             first_n_chunks=self.config.get("overview_first_n_chunks", 5),
             out_path=ov_path if ov_path else None,
         )
@@ -138,7 +139,7 @@ class IndexingPipeline:
         if self.latechunk_enabled:
             try:
                 from rag_system.indexing.latechunk import LateChunkEncoder
-                self.latechunk_encoder = LateChunkEncoder(model_name=self.config.get("embedding_model_name", "qwen3-embedding-0.6b"))
+                self.latechunk_encoder = LateChunkEncoder(model_name=self.config.get("embedding_model_name", "nomic-embed-text:v1.5"))
             except Exception as e:
                 print(f"  Failed to initialise LateChunkEncoder: {e}. Disabling latechunk retrieval.")
                 self.latechunk_enabled = False
@@ -176,6 +177,7 @@ class IndexingPipeline:
                 
                 for file_index, file_path in enumerate(file_paths, start=1):
                     try:
+                        file_started_at = time.perf_counter()
                         document_id = os.path.basename(file_path)
                         print(f"Processing: {document_id}")
                         
@@ -209,6 +211,38 @@ class IndexingPipeline:
                         all_chunks.extend(file_chunks)
                         doc_chunks_map[document_id] = file_chunks  # save for late-chunk step
                         print(f"  Generated {len(file_chunks)} chunks from {document_id}")
+
+                        conversion_methods = set()
+                        estimated_pages = None
+                        for tpl in pages_data:
+                            metadata = tpl[1] if len(tpl) >= 2 else {}
+                            if not isinstance(metadata, dict):
+                                continue
+                            method = metadata.get("conversion_method")
+                            if method:
+                                conversion_methods.add(str(method))
+
+                            if metadata.get("page_count") is not None:
+                                try:
+                                    estimated_pages = max(int(metadata.get("page_count")), estimated_pages or 0)
+                                except Exception:
+                                    pass
+
+                            seg_end = metadata.get("segment_end_page")
+                            if seg_end is not None:
+                                try:
+                                    estimated_pages = max(int(seg_end), estimated_pages or 0)
+                                except Exception:
+                                    pass
+
+                        elapsed_sec = time.perf_counter() - file_started_at
+                        method_label = ",".join(sorted(conversion_methods)) if conversion_methods else "unknown"
+                        pages_label = estimated_pages if estimated_pages is not None else "n/a"
+                        print(
+                            f"  File summary | method={method_label} | pages={pages_label} "
+                            f"| chunks={len(file_chunks)} | elapsed={elapsed_sec:.2f}s"
+                        )
+
                         file_tracker.update(1)
 
                         parse_progress = 5.0 + ((file_index / max(1, len(file_paths))) * 40.0)

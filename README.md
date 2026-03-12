@@ -90,8 +90,9 @@ npm install
 
 # Install and start Ollama
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
+ollama pull nomic-embed-text:v1.5
 ollama serve
 
 # Start the system (in a new terminal)
@@ -179,8 +180,8 @@ brew install python@3.8 node npm
 curl -fsSL https://ollama.ai/install.sh | sh
 
 # Pull recommended models
-ollama pull gemma3:4b-cloud          # Fast generation model
-ollama pull gemma3:12b-cloud            # High-quality generation model
+ollama pull gemma3:12b-cloud      # Default generation model
+ollama pull nomic-embed-text:v1.5         # Default embedding model
 ```
 
 #### 3. Configure Environment
@@ -209,8 +210,8 @@ RAG_API_PORT=8001
 
 # Optional: Override default models
 GENERATION_MODEL=gemma3:12b-cloud
-ENRICHMENT_MODEL=gemma3:4b-cloud
-EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+ENRICHMENT_MODEL=gemma3:12b-cloud
+EMBEDDING_MODEL=nomic-embed-text:v1.5
 RERANKER_MODEL=answerdotai/answerai-colbert-small-v1
 
 # Optional: PDF memory guard for indexing stability
@@ -301,7 +302,7 @@ curl -X POST http://localhost:8000/sessions \
   -d '{
     "title": "High Quality Session",
     "model": "gemma3:12b-cloud",
-    "embedding_model": "Qwen/Qwen3-Embedding-4B"
+    "embedding_model": "nomic-embed-text:v1.5:latest"
   }'
 ```
 
@@ -338,8 +339,8 @@ AcademicRAG supports multiple AI model providers with centralized configuration:
 ```python
 OLLAMA_CONFIG = {
     "host": "http://localhost:11434",
-    "generation_model": "gemma3:12b-cloud",        # Main text generation
-    "enrichment_model": "gemma3:4b-cloud"       # Lightweight routing/enrichment
+    "generation_model": "gemini-3-flash-preview:cloud",        # Main text generation
+    "enrichment_model": "gemma3:12b-cloud"       # Lightweight routing/enrichment
 }
 ```
 
@@ -439,7 +440,7 @@ ollama list
 curl http://localhost:11434/api/tags
 
 # Pull missing models
-ollama pull gemma3:4b-cloud
+ollama pull gemma3:12b-cloud
 ```
 
 #### Database Issues
@@ -562,7 +563,7 @@ POST /sessions
 Content-Type: application/json
 {
   "title": "My Session",
-  "model": "gemma3:4b-cloud"
+  "model": "gemma3:12b-cloud"
 }
 
 # Get all sessions
@@ -668,7 +669,7 @@ python demo_batch_indexing.py --config batch_indexing_config.json
     "enable_latechunk": true,
     "enable_docling": true,
     "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
-    "generation_model": "gemma3:4b-cloud",
+    "generation_model": "gemma3:12b-cloud",
     "retrieval_mode": "hybrid",
     "window_size": 2
   }
@@ -778,5 +779,5 @@ npm install
 
 # Install Ollama and models
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma3:4b-cloud gemma3:12b-cloud
+ollama pull gemma3:12b-cloud gemma3:27b-cloud
 

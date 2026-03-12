@@ -109,8 +109,8 @@
   "window_size": 2,                           // Optional  context window
   "enable_enrich": true,                      // Optional  enable enrichment
   "embedding_model": "Qwen/Qwen3-Embedding-0.6B",  // Optional  embedding model
-  "enrich_model": "gemma3:4b-cloud",               // Optional  enrichment model
-  "overview_model_name": "gemma3:4b-cloud",        // Optional  overview model
+  "enrich_model": "gemma3:12b-cloud",               // Optional  enrichment model
+  "overview_model_name": "gemma3:12b-cloud",        // Optional  overview model
   "batch_size_embed": 50,                     // Optional  embedding batch size
   "batch_size_enrich": 25                     // Optional  enrichment batch size
 }
@@ -194,8 +194,8 @@ The React/Next.js frontend calls the backend via a typed wrapper. Important meth
   "windowSize": 2,
   "enableEnrich": true,
   "embeddingModel": "Qwen/Qwen3-Embedding-0.6B",
-  "enrichModel": "gemma3:4b-cloud",
-  "overviewModel": "gemma3:4b-cloud",
+  "enrichModel": "gemma3:12b-cloud",
+  "overviewModel": "gemma3:12b-cloud",
   "batchSizeEmbed": 64,
   "batchSizeEnrich": 32
 }

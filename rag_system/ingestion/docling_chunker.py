@@ -17,14 +17,12 @@ from rag_system.ingestion.chunking import MarkdownRecursiveChunker
 from transformers import AutoTokenizer
 
 class DoclingChunker:
-    def __init__(self, *, max_tokens: int = 512, overlap: int = 1, tokenizer_model: str = "Qwen/Qwen3-Embedding-0.6B"):
+    def __init__(self, *, max_tokens: int = 512, overlap: int = 1, tokenizer_model: str = "nomic-embed-text:v1.5"):
         self.max_tokens = max_tokens
         self.overlap = overlap  # sentences of overlap
         repo_id = tokenizer_model
-        if "/" not in tokenizer_model and not tokenizer_model.startswith("Qwen/"):
-            repo_id = {
-                "qwen3-embedding-0.6b": "Qwen/Qwen3-Embedding-0.6B",
-            }.get(tokenizer_model.lower(), tokenizer_model)
+        if "/" not in tokenizer_model:
+            repo_id = tokenizer_model
         
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)

@@ -980,7 +980,10 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                 resp.raise_for_status()
                 data = resp.json()
 
-                all_ollama_models = [m.get('name') for m in data.get('models', [])]
+                all_ollama_models = [
+                    m.get('name') for m in data.get('models', [])
+                    if isinstance(m.get('name'), str) and m.get('name').strip()
+                ]
 
                 # Very naive classification
                 ollama_embedding_models = [m for m in all_ollama_models if any(k in m for k in ['embed','bge','embedding','text'])]
@@ -993,15 +996,15 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
             
             # Add supported HuggingFace embedding models
             huggingface_embedding_models = [
-                "Qwen/Qwen3-Embedding-0.6B",
+                "nomic-embed-text:v1.5",
                 "Qwen/Qwen3-Embedding-4B", 
                 "Qwen/Qwen3-Embedding-8B"
             ]
             embedding_models.extend(huggingface_embedding_models)
             
-            # Sort models for consistent ordering
-            generation_models.sort()
-            embedding_models.sort()
+            # De-duplicate and sort models for consistent ordering
+            generation_models = sorted(set(generation_models))
+            embedding_models = sorted(set(embedding_models))
 
             self.send_json_response({
                 "generation_models": generation_models,

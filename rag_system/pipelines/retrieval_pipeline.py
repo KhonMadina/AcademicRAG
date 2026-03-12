@@ -7,6 +7,7 @@ import json
 import lancedb
 import logging
 import math
+import hashlib
 import numpy as np
 from threading import Lock
 from collections import defaultdict
@@ -67,6 +68,63 @@ class RetrievalPipeline:
         self.reranker = None
         self.ai_reranker = None
         self._chunk_window_cache: Dict[tuple, List[Dict[str, Any]]] = {}
+        perf_cfg = self.config.get("performance", {})
+        query_cache_cfg = perf_cfg.get("query_result_cache", {}) if isinstance(perf_cfg, dict) else {}
+        self._query_result_cache_enabled = bool(query_cache_cfg.get("enabled", False))
+        self._query_result_cache_ttl_seconds = int(query_cache_cfg.get("ttl_seconds", 120))
+        self._query_result_cache_max_entries = int(query_cache_cfg.get("max_entries", 256))
+        self._query_result_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _build_query_cache_key(self, query: str, table_name: str | None) -> str:
+        search_type = self.retriever_configs.get("search_type", "hybrid")
+        dense_weight = float(
+            self.retriever_configs.get("dense", {}).get(
+                "weight", self.config.get("fusion", {}).get("vec_weight", 0.5)
+            )
+        )
+        reranker_cfg = self.config.get("reranker", {})
+        payload = {
+            "query": query,
+            "table_name": table_name or self.storage_config.get("text_table_name"),
+            "retrieval_k": int(self.config.get("retrieval_k", 10)),
+            "search_type": search_type,
+            "dense_weight": round(min(max(dense_weight, 0.0), 1.0), 4),
+            "ai_rerank": bool(reranker_cfg.get("enabled", False)),
+            "reranker_top_k": reranker_cfg.get("top_k"),
+            "context_window_size": int(self.config.get("context_window_size", 0)),
+        }
+        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _get_cached_query_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        if not self._query_result_cache_enabled:
+            return None
+        cached = self._query_result_cache.get(cache_key)
+        if not cached:
+            return None
+        age_seconds = time.time() - float(cached.get("ts", 0.0))
+        if age_seconds > self._query_result_cache_ttl_seconds:
+            self._query_result_cache.pop(cache_key, None)
+            return None
+        result = cached.get("result") or {}
+        return {
+            "answer": result.get("answer", ""),
+            "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
+        }
+
+    def _store_cached_query_result(self, cache_key: str, result: Dict[str, Any]) -> None:
+        if not self._query_result_cache_enabled:
+            return
+        if len(self._query_result_cache) >= self._query_result_cache_max_entries:
+            oldest_key = min(self._query_result_cache.items(), key=lambda item: float(item[1].get("ts", 0.0)))[0]
+            self._query_result_cache.pop(oldest_key, None)
+        self._query_result_cache[cache_key] = {
+            "ts": time.time(),
+            "result": {
+                "answer": result.get("answer", ""),
+                "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
+            },
+        }
 
     def _get_text_table_name(self) -> str:
         return self.storage_config.get("text_table_name") or self.config["storage"].get("text_table_name")
@@ -207,7 +265,7 @@ class RetrievalPipeline:
         if self.text_embedder is None:
             from rag_system.indexing.representations import select_embedder
             self.text_embedder = select_embedder(
-                self.config.get("embedding_model_name", "BAAI/bge-small-en-v1.5"),
+                self.config.get("embedding_model_name", "nomic-embed-text:v1.5"),
                 self.ollama_config.get("host") if isinstance(self.ollama_config, dict) else None,
             )
         return self.text_embedder
@@ -323,13 +381,14 @@ Context you receive
  ORIGINAL QUESTION  the user's actual query.
 
 Instructions
-1. Evaluate each snippet for relevance to the ORIGINAL QUESTION; ignore those that do not help answer it.  
-2. Synthesise an answer **using only information from the relevant snippets**.  
-3. If snippets contradict one another, mention the contradiction explicitly.  
-4. If the snippets do not contain the needed information, reply exactly with:  
-   "I could not find that information in the provided documents."  
-5. Provide a thorough, well-structured answer. Use paragraphs or bullet points where helpful, and include any relevant numbers/names exactly as they appear. There is **no strict sentence limit**, but aim for clarity over brevity.  
-6. Do **not** introduce external knowledge unless step 4 applies; in that case you may add a clearly-labelled "General knowledge" sentence after the required statement.
+1. Evaluate each snippet for relevance to the ORIGINAL QUESTION; ignore those that do not help answer it.
+2. Synthesise an answer **using only information from the relevant snippets**.
+3. If snippets contradict one another, mention the contradiction explicitly.
+4. If the snippets do not contain the needed information, reply exactly with:
+    "I could not find that information in the provided documents."
+5. Every substantive claim must include at least one citation tag in the form `[S#]` where `#` maps to the Retrieved Snippet number.
+6. Keep citations precise: do not cite snippets that do not support the claim.
+7. Do **not** introduce external knowledge unless step 4 applies; in that case you may add one clearly-labelled "General knowledge" sentence after the required statement.
 
 Output format
 Answer:
@@ -355,6 +414,12 @@ ORIGINAL QUESTION: "{query}"
 
     def run(self, query: str, table_name: str = None, window_size_override: Optional[int] = None, event_callback=None) -> Dict[str, Any]:
         self._chunk_window_cache = {}
+        cache_key = self._build_query_cache_key(query, table_name)
+        cached_result = self._get_cached_query_result(cache_key)
+        if cached_result is not None:
+            if event_callback:
+                event_callback("cache_hit", {"level": "retrieval_pipeline"})
+            return cached_result
         try:
             start_time = time.time()
             retrieval_k = self.config.get("retrieval_k", 10)
@@ -462,6 +527,18 @@ ORIGINAL QUESTION: "{query}"
                         top_k = top_k_cfg or len(retrieved_docs)
                 else:
                     top_k = top_k_cfg or len(retrieved_docs)
+
+                dynamic_top_k_cfg = rerank_cfg.get("dynamic_top_k", {}) if isinstance(rerank_cfg, dict) else {}
+                if dynamic_top_k_cfg.get("enabled"):
+                    short_query_threshold = int(dynamic_top_k_cfg.get("short_query_tokens", 6))
+                    short_query_cap = int(dynamic_top_k_cfg.get("short_query_top_k", 8))
+                    long_query_floor = int(dynamic_top_k_cfg.get("long_query_min_top_k", 12))
+                    query_tokens = len(str(query or "").split())
+                    if query_tokens <= short_query_threshold:
+                        top_k = min(top_k, short_query_cap)
+                    else:
+                        top_k = max(top_k, long_query_floor)
+                    top_k = max(1, min(top_k, len(retrieved_docs)))
 
                 strategy = self.config.get("reranker", {}).get("strategy", "qwen")
 
@@ -571,7 +648,7 @@ ORIGINAL QUESTION: "{query}"
                     if key in doc:
                         doc[key] = _clean_val(doc[key])
 
-            context = "\n\n".join([doc['text'] for doc in final_docs])
+            context = "\n\n".join([f"[S{i+1}] {doc['text']}" for i, doc in enumerate(final_docs)])
 
             #  DEBUG: Show the exact context passed to the LLM after pruning
             print("\n=== Context passed to LLM (post-pruning) ===")
@@ -582,8 +659,9 @@ ORIGINAL QUESTION: "{query}"
             print("=== End of context ===\n")
 
             final_answer = self._synthesize_final_answer(query, context, event_callback=event_callback)
-            
-            return {"answer": final_answer, "source_documents": final_docs}
+            result = {"answer": final_answer, "source_documents": final_docs}
+            self._store_cached_query_result(cache_key, result)
+            return result
         finally:
             self._chunk_window_cache.clear()
 

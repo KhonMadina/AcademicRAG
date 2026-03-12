@@ -104,7 +104,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
   const [rerankerTopK, setRerankerTopK] = useState<number>(10)
   const [searchType, setSearchType] = useState<string>('hybrid')
   const [generationModels,setGenerationModels]=useState<string[]>([])
-  const [selectedModel,setSelectedModel]=useState<string>('gemma3:12b-cloud')
+  const [selectedModel,setSelectedModel]=useState<string>('gemma3:27b-cloud')
   const [currentIndexId, setCurrentIndexId] = useState<string | null>(null)
   const [currentIndexName, setCurrentIndexName] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -179,7 +179,7 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
         const resp=await apiService.getModels();
         setGenerationModels(resp.generation_models||[])
         if(resp.generation_models&&resp.generation_models.length>0){
-          const def = resp.generation_models.find((m:string)=>m==='gemma3:12b-cloud');
+          const def = resp.generation_models.find((m:string)=>m==='gemma3:27b-cloud');
           setSelectedModel(def || resp.generation_models[0])
         }
       }catch(e){console.warn('Failed to load models',e)}

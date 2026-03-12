@@ -173,7 +173,7 @@ This slide helps demonstrate originality and technical depth.
 **Models**
 
 - `gemma3:12b-cloud` for generation
-- `gemma3:4b-cloud` for routing and enrichment
+- `gemma3:12b-cloud` for routing and enrichment
 - `Qwen/Qwen3-Embedding-0.6B` for embeddings
 - `answerdotai/answerai-colbert-small-v1` for reranking
 

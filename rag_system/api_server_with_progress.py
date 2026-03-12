@@ -163,7 +163,7 @@ def run_indexing_with_progress(file_paths: List[str], session_id: str):
         except FileNotFoundError:
             # Fallback to default config
             config = {
-                "embedding_model_name": "Qwen/Qwen3-Embedding-0.6B",
+                "embedding_model_name": "nomic-embed-text:v1.5",
                 "indexing": {
                     "embedding_batch_size": 50,
                     "enrichment_batch_size": 10,
@@ -184,8 +184,8 @@ def run_indexing_with_progress(file_paths: List[str], session_id: str):
         # Initialize components
         ollama_client = OllamaClient()
         ollama_config = {
-            "generation_model": "llama3.2:1b",
-            "embedding_model": "mxbai-embed-large"
+            "generation_model": "gemma3:12b-cloud",
+            "embedding_model": "nomic-embed-text:v1.5"
         }
         
         # Create enhanced pipeline

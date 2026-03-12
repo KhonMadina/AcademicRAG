@@ -10,8 +10,8 @@ This checklist is the release gate for Sprint 8 / T8.3.
 - [ ] Node dependencies installed (`package.json`)
 - [ ] Ollama installed and running
 - [ ] Required Ollama models available:
-  - [ ] `gemma3:4b-cloud`
   - [ ] `gemma3:12b-cloud`
+  - [ ] `gemma3:27b-cloud`
 
 ### B. Configuration and Paths
 

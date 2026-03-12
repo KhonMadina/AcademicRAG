@@ -51,8 +51,8 @@ curl -fsSL https://ollama.ai/install.sh | sh
 ollama serve
 
 # Install models (in another terminal)
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
 ```
 
 ### Step 3: Start the System (Primary Path)

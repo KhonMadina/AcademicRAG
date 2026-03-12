@@ -175,7 +175,7 @@ EXTERNAL_MODELS = {
 
 OLLAMA_CONFIG = {
     "generation_model": "gemma3:12b-cloud",  # High-quality generation
-    "enrichment_model": "gemma3:4b-cloud",  # Fast enrichment/routing
+    "enrichment_model": "gemma3:27b-cloud",  # Fast enrichment/routing
     "host": "http://localhost:11434"
 }
 ```
@@ -192,7 +192,7 @@ OLLAMA_CONFIG = {
 
 #### **Generation Models** (via Ollama)
 - `gemma3:12b-cloud` - Primary generation model (high quality)
-- `gemma3:4b-cloud` - Fast enrichment and routing model
+- `gemma3:12b-cloud` - Fast enrichment and routing model
 
 #### **Reranking Models**
 - `answerdotai/answerai-colbert-small-v1` - Primary ColBERT reranker
@@ -312,7 +312,7 @@ EXTERNAL_MODELS = {
 # Generation model configuration
 OLLAMA_CONFIG = {
     "generation_model": "gemma3:12b-cloud",  # Your LLM model
-    "enrichment_model": "gemma3:4b-cloud",  # Your fast model
+    "enrichment_model": "gemma3:12b-cloud",  # Your fast model
 }
 ```
 

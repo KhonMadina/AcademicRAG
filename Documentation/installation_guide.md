@@ -64,14 +64,14 @@ ollama --version
 ollama serve
 
 # In another terminal, install required models
-ollama pull gemma3:4b-cloud      # Fast model (650MB)
+ollama pull gemma3:12b-cloud      # Fast model (650MB)
 ollama pull gemma3:12b-cloud        # High-quality model (4.7GB)
 
 # Verify models are installed
 ollama list
 
 # Test Ollama
-ollama run gemma3:4b-cloud "Hello, how are you?"
+ollama run gemma3:12b-cloud "Hello, how are you?"
 ```
 
 ** Important**: Keep Ollama running (`ollama serve`) for the entire setup process.
@@ -185,7 +185,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 #### **Model Configuration**
 The system defaults to these models:
 - **Embedding**: `Qwen/Qwen3-Embedding-0.6B` (1024 dimensions)
-- **Generation**: `gemma3:4b-cloud` for fast responses, `gemma3:12b-cloud` for quality
+- **Generation**: `gemma3:12b-cloud` for fast responses, `gemma3:12b-cloud` for quality
 - **Reranking**: Built-in cross-encoder
 
 ### 5.3 Database Initialization
@@ -282,7 +282,7 @@ pkill ollama
 ollama serve
 
 # Reinstall models if needed
-ollama pull gemma3:4b-cloud
+ollama pull gemma3:12b-cloud
 ollama pull gemma3:12b-cloud
 ```
 
@@ -319,7 +319,7 @@ free -h  # Linux
 vm_stat  # macOS
 
 # Use smaller models
-ollama pull gemma3:4b-cloud  # Instead of gemma3:12b-cloud
+ollama pull gemma3:12b-cloud  # Instead of gemma3:12b-cloud
 ```
 
 #### **Slow Performance:**
@@ -336,7 +336,7 @@ ollama pull gemma3:4b-cloud  # Instead of gemma3:12b-cloud
 
 ```bash
 # Install additional models (optional)
-ollama pull nomic-embed-text        # Alternative embedding model
+ollama pull nomic-embed-text:v1.5        # Alternative embedding model
 ollama pull llama3.1:8b            # Alternative generation model
 
 # Test model switching

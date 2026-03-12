@@ -361,7 +361,7 @@ class ChatAPI {
         },
         body: JSON.stringify({
           message: request.message,
-          model: request.model || 'llama3.2:latest',
+          model: request.model || 'gemma3:12b-cloud',
           conversation_history: request.conversation_history || [],
         }),
       });
@@ -401,7 +401,7 @@ class ChatAPI {
     }
   }
 
-  async createSession(title: string = 'New Chat', model: string = 'llama3.2:latest'): Promise<ChatSession> {
+  async createSession(title: string = 'New Chat', model: string = 'gemma3:12b-cloud'): Promise<ChatSession> {
     try {
       const response = await fetch(`${API_BASE_URL}/sessions`, {
         method: 'POST',

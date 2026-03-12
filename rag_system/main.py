@@ -51,7 +51,6 @@ PIPELINE_CONFIGS = {
             "lancedb_uri": "./lancedb",
             "text_table_name": "text_pages_v3", 
             "image_table_name": "image_pages_v3",
-            "bm25_path": "./index_store/bm25",
             "graph_path": "./index_store/graph/knowledge_graph.gml"
         },
         "retrieval": {
@@ -113,8 +112,7 @@ PIPELINE_CONFIGS = {
         "storage": {
             "lancedb_uri": "./lancedb",
             "text_table_name": "text_pages_v3",
-            "image_table_name": "image_pages_v3", 
-            "bm25_path": "./index_store/bm25"
+            "image_table_name": "image_pages_v3"
         },
         "retrieval": {
             "retriever": "multivector",

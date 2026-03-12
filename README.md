@@ -363,8 +363,7 @@ AcademicRAG offers two main pipeline configurations:
     "description": "Production-ready pipeline with hybrid search, AI reranking, and verification",
     "storage": {
         "lancedb_uri": "./lancedb",
-        "text_table_name": "text_pages_v3",
-        "bm25_path": "./index_store/bm25"
+      "text_table_name": "text_pages_v3"
     },
     "retrieval": {
         "retriever": "multivector",

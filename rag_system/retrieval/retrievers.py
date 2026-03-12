@@ -19,8 +19,7 @@ from rag_system.indexing.representations import QwenEmbedder
 from rag_system.indexing.multimodal import LocalVisionModel
 from rag_system.utils.logging_utils import log_retrieval_results
 
-# BM25Retriever is no longer needed.
-# class BM25Retriever: ...
+# Lexical retrieval is handled via LanceDB FTS inside MultiVectorRetriever.
 
 from fuzzywuzzy import process
 

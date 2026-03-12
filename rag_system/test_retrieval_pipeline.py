@@ -12,6 +12,14 @@ class DummyOllamaClient:
         yield "dummy"
 
 
+class ScaffoldEchoOllamaClient:
+    def stream_completion(self, model: str, prompt: str):
+        yield "Answer:\n"
+        yield "CJCC focuses on student exchange programs [S1].\n\n"
+        yield "Retrieved Snippets\n"
+        yield "[S1] source text"
+
+
 class FakeDenseRetriever:
     def __init__(self, docs=None):
         self.docs = docs or []
@@ -192,6 +200,17 @@ class RetrievalPipelineSmokeTests(unittest.TestCase):
         self.assertTrue(result["retrieval"]["ai_rerank_applied"])
         self.assertEqual(post_docs[0]["chunk_id"], "c2")
         self.assertEqual(post_docs[0]["rerank_score"], 0.99)
+
+    def test_synthesize_strips_prompt_scaffolding(self):
+        pipeline = self._make_pipeline()
+        pipeline.ollama_client = ScaffoldEchoOllamaClient()
+
+        answer = pipeline._synthesize_final_answer(
+            "What does CJCC focus on?",
+            "[S1] CJCC focuses on student exchange programs.",
+        )
+
+        self.assertEqual(answer, "CJCC focuses on student exchange programs [S1].")
 
 
 if __name__ == "__main__":

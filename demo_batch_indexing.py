@@ -284,8 +284,7 @@ def create_sample_config():
                 }
             },
             "storage": {
-                "lancedb_uri": "./index_store/lancedb",
-                "bm25_path": "./index_store/bm25"
+                "lancedb_uri": "./index_store/lancedb"
             }
         },
         "ollama_config": {

@@ -144,7 +144,6 @@ tables/
 ```
 index_store/
  overviews/           -- Document summaries for routing
- bm25/               -- BM25 keyword indexes
  graph/              -- Knowledge graph data
 ```
 
@@ -214,7 +213,6 @@ PIPELINE_CONFIGS = {
         "storage": {
             "lancedb_uri": "./lancedb",
             "text_table_name": "text_pages_v3", 
-            "bm25_path": "./index_store/bm25",
             "graph_path": "./index_store/graph/knowledge_graph.gml"
         },
         "retrieval": {
@@ -374,7 +372,7 @@ The system supports multiple configuration modes optimized for different use cas
 
 ### **Default Mode** (`"default"`)
 - **Description**: Production-ready pipeline with full features
-- **Search**: Hybrid (dense + BM25) with 0.7 dense weight
+- **Search**: Hybrid (dense + FTS) with 0.7 dense weight
 - **Reranking**: AI-powered ColBERT reranker
 - **Query Processing**: Query decomposition enabled
 - **Verification**: Grounding verification enabled
@@ -383,17 +381,12 @@ The system supports multiple configuration modes optimized for different use cas
 
 ### **Fast Mode** (`"fast"`)  
 - **Description**: Speed-optimized pipeline with minimal overhead
-- **Search**: Vector-only (no BM25, no late chunking)
+- **Search**: Vector-only (no FTS, no late chunking)
 - **Reranking**: Disabled
 - **Query Processing**: Single-pass, no decomposition
 - **Verification**: Disabled
 - **Performance**: ~1-3 seconds per query
 - **Memory**: ~8-12GB (with models loaded)
-
-### **BM25 Mode** (`"bm25"`)
-- **Description**: Traditional keyword-based search
-- **Search**: BM25 only
-- **Use Case**: Exact keyword matching, legacy compatibility
 
 ### **Graph RAG Mode** (`"graph_rag"`)
 - **Description**: Knowledge graph integration (currently disabled)

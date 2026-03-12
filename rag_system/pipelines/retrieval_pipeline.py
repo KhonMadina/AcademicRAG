@@ -4,6 +4,7 @@ from PIL import Image
 import concurrent.futures
 import time
 import json
+import re
 import lancedb
 import logging
 import math
@@ -293,17 +294,12 @@ class RetrievalPipeline:
         return self.dense_retriever
 
     def _get_bm25_retriever(self):
-        if self.bm25_retriever is None and self.retriever_configs.get("bm25", {}).get("enabled"):
-            try:
-                print(f" Lazily initializing BM25 retriever...")
-                self.bm25_retriever = BM25Retriever(
-                    index_path=self.storage_config["bm25_path"],
-                    index_name=self.retriever_configs["bm25"]["index_name"]
-                )
-                print(" BM25 retriever initialized successfully")
-            except Exception as e:
-                print(f" Failed to initialize BM25 retriever on demand: {e}")
-                # Keep it None so we don't try again
+        # Legacy compatibility: standalone lexical retriever was removed in favor of
+        # LanceDB native FTS inside MultiVectorRetriever.
+        if self.retriever_configs.get("bm25", {}).get("enabled"):
+            logging.getLogger(__name__).debug(
+                "Standalone BM25 retriever is deprecated; using LanceDB FTS via MultiVectorRetriever."
+            )
         return self.bm25_retriever
 
     def _get_graph_retriever(self):
@@ -391,8 +387,8 @@ Instructions
 7. Do **not** introduce external knowledge unless step 4 applies; in that case you may add one clearly-labelled "General knowledge" sentence after the required statement.
 
 Output format
-Answer:
-<your answer here>
+Return only the answer text as plain prose.
+Do not include section headers (e.g., "Answer:" or "Retrieved Snippets"), prompt text, or the snippets themselves.
 
   Retrieved Snippets  
 {facts}
@@ -410,7 +406,17 @@ ORIGINAL QUESTION: "{query}"
             if event_callback:
                 event_callback("token", {"text": tok})
 
-        return "".join(answer_parts)
+        raw_answer = "".join(answer_parts).strip()
+
+        # Defensive cleanup in case the model still echoes prompt scaffolding.
+        cleaned = re.sub(r"^\s*Answer\s*:\s*", "", raw_answer, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\n\s*Retrieved\s+Snippets\b[\s\S]*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        return cleaned or raw_answer
 
     def run(self, query: str, table_name: str = None, window_size_override: Optional[int] = None, event_callback=None) -> Dict[str, Any]:
         self._chunk_window_cache = {}

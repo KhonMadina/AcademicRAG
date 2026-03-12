@@ -176,8 +176,7 @@ def run_indexing_with_progress(file_paths: List[str], session_id: str):
                 },
                 "storage": {
                     "chunk_store_path": "./index_store/chunks/chunks.pkl",
-                    "lancedb_uri": "./index_store/lancedb",
-                    "bm25_path": "./index_store/bm25"
+                    "lancedb_uri": "./index_store/lancedb"
                 }
             }
         

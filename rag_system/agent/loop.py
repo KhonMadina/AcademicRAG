@@ -285,47 +285,6 @@ Respond with JSON: {{"category": "<your_choice>"}}
     # ---------------- Main async implementation --------------------------------------
     async def _run_async(self, query: str, table_name: str = None, session_id: str = None, compose_sub_answers: Optional[bool] = None, query_decompose: Optional[bool] = None, ai_rerank: Optional[bool] = None, context_expand: Optional[bool] = None, verify: Optional[bool] = None, retrieval_k: Optional[int] = None, context_window_size: Optional[int] = None, reranker_top_k: Optional[int] = None, search_type: Optional[str] = None, dense_weight: Optional[float] = None, max_retries: int = 1, event_callback: Optional[callable] = None) -> Dict[str, Any]:
         start_time = time.time()
-        timings_ms: Dict[str, float] = {
-            "triage": 0.0,
-            "retrieval": 0.0,
-            "rerank": 0.0,
-            "context_expand": 0.0,
-            "generation": 0.0,
-            "verification": 0.0,
-            "total": 0.0,
-        }
-
-        def _elapsed_ms(stage_started_at: float) -> float:
-            return round((time.time() - stage_started_at) * 1000.0, 2)
-
-        def _merge_existing_timings(result_payload: Dict[str, Any]) -> None:
-            existing_timings = result_payload.get("timings_ms")
-            if not isinstance(existing_timings, dict):
-                return
-            for key in ("triage", "retrieval", "rerank", "context_expand", "generation", "verification"):
-                value = existing_timings.get(key)
-                if isinstance(value, (int, float)):
-                    timings_ms[key] = round(float(value), 2)
-
-        def _finalize_result(result_payload: Dict[str, Any], *, cache_hit: bool = False) -> Dict[str, Any]:
-            finalized = dict(result_payload)
-            metadata = finalized.get("metadata") if isinstance(finalized.get("metadata"), dict) else {}
-            if cache_hit:
-                metadata = {**metadata, "cache_hit": True}
-            if metadata:
-                finalized["metadata"] = metadata
-
-            timings_ms["total"] = _elapsed_ms(start_time)
-            finalized["timings_ms"] = {key: round(float(value), 2) for key, value in timings_ms.items()}
-
-            if timings_ms["rerank"] > 3000:
-                print(f" Slow rerank phase detected: {timings_ms['rerank']:.2f}ms")
-            if timings_ms["verification"] > 8000:
-                print(f" Slow verification phase detected: {timings_ms['verification']:.2f}ms")
-            if timings_ms["total"] > 15000:
-                print(f" Slow total query time detected: {timings_ms['total']:.2f}ms")
-
-            return finalized
         
         # Emit analyze event at the start
         if event_callback:
@@ -346,9 +305,7 @@ Respond with JSON: {{"category": "<your_choice>"}}
         #             self._load_overviews(self._global_overview_path)
         #             self._current_overview_session = "GLOBAL"
         
-        triage_started_at = time.time()
         query_type = await self._triage_query_async(query, history)
-        timings_ms["triage"] = _elapsed_ms(triage_started_at)
         print(f" ROUTING DEBUG: Final triage decision: '{query_type}'")
         print(f"Agent Triage Decision: '{query_type}'")
         
@@ -415,8 +372,7 @@ Respond with JSON: {{"category": "<your_choice>"}}
                     if session_id:
                         history.append({"query": query, "answer": cached_result.get('answer', 'Cached answer not found.')})
                         self.chat_histories[session_id] = history
-                    cached_payload = dict(cached_result)
-                    return _finalize_result(cached_payload, cache_hit=True)
+                    return cached_result
                 self._record_cache_lookup(hit=False)
 
         if query_type == "direct_answer":
@@ -446,16 +402,12 @@ Respond with JSON: {{"category": "<your_choice>"}}
                 await asyncio.to_thread(_blocking_stream)
                 return "".join(answer_parts)
 
-            generation_started_at = time.time()
             final_answer = await _run_stream()
-            timings_ms["generation"] = _elapsed_ms(generation_started_at)
             result = {"answer": final_answer, "source_documents": []}
         
         elif query_type == "graph_query" and hasattr(self, 'graph_retriever'):
             print(f" ROUTING DEBUG: Executing GRAPH_QUERY path")
-            retrieval_started_at = time.time()
             result = self._run_graph_query(query, history)
-            timings_ms["retrieval"] = _elapsed_ms(retrieval_started_at)
 
         # --- RAG Query Processing with Optional Query Decomposition ---
         else: # Default to rag_query
@@ -493,15 +445,12 @@ Respond with JSON: {{"category": "<your_choice>"}}
                 # parallel/composition machinery for efficiency.
                 if len(sub_queries) == 1:
                     print("--- Only one sub-query after decomposition; using direct retrieval path ---")
-                    retrieval_started_at = time.time()
                     result = self.retrieval_pipeline.run(
                         sub_queries[0],
                         table_name,
                         0 if context_expand is False else None,
                         event_callback=event_callback
                     )
-                    timings_ms["retrieval"] = _elapsed_ms(retrieval_started_at)
-                    _merge_existing_timings(result)
                     if event_callback:
                         event_callback("single_query_result", result)
                     # Emit retrieval_done and rerank_done for single sub-query
@@ -586,7 +535,6 @@ Respond with JSON: {{"category": "<your_choice>"}}
                                 print(f" Sub-Query {i+1} failed: '{sub_query}' - {e}")
 
                     parallel_time = time.time() - start_time_inner
-                    timings_ms["retrieval"] = round(parallel_time * 1000.0, 2)
                     print(f" Parallel processing completed in {parallel_time:.2f}s")
 
                     # Emit retrieval_done and rerank_done after all sub-queries are processed
@@ -624,7 +572,6 @@ FINAL ANSWER:
 """
                         # --- Stream composition answer token-by-token ---
                         answer_parts: list[str] = []
-                        generation_started_at = time.time()
 
                         for tok in self.llm_client.stream_completion(
                             model=self.ollama_config["generation_model"],
@@ -635,7 +582,6 @@ FINAL ANSWER:
                                 event_callback("token", {"text": tok})
 
                         final_answer = "".join(answer_parts) or "Unable to generate an answer."
-                        timings_ms["generation"] = _elapsed_ms(generation_started_at)
 
                         result = {
                             "answer": final_answer,
@@ -648,9 +594,7 @@ FINAL ANSWER:
 
                         if all_source_docs:
                             aggregated_context = "\n\n".join([doc['text'] for doc in all_source_docs])
-                            generation_started_at = time.time()
                             final_answer = self.retrieval_pipeline._synthesize_final_answer(contextual_query, aggregated_context)
-                            timings_ms["generation"] = _elapsed_ms(generation_started_at)
                             result = {
                                 "answer": final_answer,
                                 "source_documents": all_source_docs
@@ -677,10 +621,7 @@ FINAL ANSWER:
                     snippet = (d.get('text','') or '')[:200].replace('\n',' ')
                     print(f"Orig[{i}] id={d.get('chunk_id')} dist={d.get('_distance','') or d.get('score','')}  {snippet}")
 
-                retrieval_started_at = time.time()
                 result = self.retrieval_pipeline.run(contextual_query, table_name, 0 if context_expand is False else None, event_callback=event_callback)
-                timings_ms["retrieval"] = _elapsed_ms(retrieval_started_at)
-                _merge_existing_timings(result)
 
                 # After run, result['source_documents'] is reranked list
                 reranked_docs = result.get('source_documents', [])
@@ -698,9 +639,7 @@ FINAL ANSWER:
             
         if verification_enabled and result.get("source_documents"):
             context_str = "\n".join([doc['text'] for doc in result['source_documents']])
-            verification_started_at = time.time()
             verification = await self.verifier.verify_async(contextual_query, context_str, result['answer'])
-            timings_ms["verification"] = _elapsed_ms(verification_started_at)
             result['verification'] = {
                 "enabled": True,
                 "is_grounded": bool(verification.is_grounded),
@@ -749,7 +688,7 @@ FINAL ANSWER:
         total_time = time.time() - start_time
         print(f" Total query processing time: {total_time:.2f}s")
         
-        return _finalize_result(result)
+        return result
 
     # ------------------------------------------------------------------
     def _route_via_overviews(self, query: str) -> str | None:

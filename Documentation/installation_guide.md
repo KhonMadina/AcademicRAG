@@ -64,14 +64,14 @@ ollama --version
 ollama serve
 
 # In another terminal, install required models
-ollama pull gemma3:4b-cloud      # Fast model (650MB)
+ollama pull gemma3:12b-cloud      # Fast model (650MB)
 ollama pull gemma3:12b-cloud        # High-quality model (4.7GB)
 
 # Verify models are installed
 ollama list
 
 # Test Ollama
-ollama run gemma3:4b-cloud "Hello, how are you?"
+ollama run gemma3:12b-cloud "Hello, how are you?"
 ```
 
 ** Important**: Keep Ollama running (`ollama serve`) for the entire setup process.
@@ -120,10 +120,15 @@ curl http://localhost:11434/api/tags
 # Start all components with one command
 python run_system.py
 
+# Optional launcher utilities
+python run_system.py --health
+python run_system.py --no-frontend
+
 # Or start components manually in separate terminals:
-# Terminal 1: python -m rag_system.api_server
-# Terminal 2: cd backend && python server.py  
-# Terminal 3: npm run dev
+# Terminal 1: ollama serve
+# Terminal 2: python -m rag_system.api_server
+# Terminal 3: cd backend && python server.py  
+# Terminal 4: npm run dev
 ```
 
 ### 4.3 Test Direct Development
@@ -135,7 +140,9 @@ python system_health_check.py
 # Test endpoints
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 
 # Access the application
 open http://localhost:3000
@@ -178,7 +185,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 #### **Model Configuration**
 The system defaults to these models:
 - **Embedding**: `Qwen/Qwen3-Embedding-0.6B` (1024 dimensions)
-- **Generation**: `gemma3:4b-cloud` for fast responses, `gemma3:12b-cloud` for quality
+- **Generation**: `gemma3:12b-cloud` for fast responses, `gemma3:12b-cloud` for quality
 - **Reranking**: Built-in cross-encoder
 
 ### 5.3 Database Initialization
@@ -210,8 +217,10 @@ python system_health_check.py
 # Universal health check
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
 curl -f http://localhost:11434/api/tags && echo " Ollama OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 ```
 
 #### **RAG System Test:**
@@ -273,7 +282,7 @@ pkill ollama
 ollama serve
 
 # Reinstall models if needed
-ollama pull gemma3:4b-cloud
+ollama pull gemma3:12b-cloud
 ollama pull gemma3:12b-cloud
 ```
 
@@ -310,7 +319,7 @@ free -h  # Linux
 vm_stat  # macOS
 
 # Use smaller models
-ollama pull gemma3:4b-cloud  # Instead of gemma3:12b-cloud
+ollama pull gemma3:12b-cloud  # Instead of gemma3:12b-cloud
 ```
 
 #### **Slow Performance:**
@@ -327,7 +336,7 @@ ollama pull gemma3:4b-cloud  # Instead of gemma3:12b-cloud
 
 ```bash
 # Install additional models (optional)
-ollama pull nomic-embed-text        # Alternative embedding model
+ollama pull nomic-embed-text:v1.5        # Alternative embedding model
 ollama pull llama3.1:8b            # Alternative generation model
 
 # Test model switching

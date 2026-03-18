@@ -7,7 +7,7 @@ import React, { useMemo } from 'react'
 import remarkGfm from 'remark-gfm'
 
 // Dynamically import react-markdown to avoid SSR issues
-const ReactMarkdown: any = dynamic(() => import('react-markdown') as any, { ssr: false })
+const ReactMarkdown = dynamic(() => import('react-markdown'), { ssr: false })
 
 interface MarkdownProps {
   text: string

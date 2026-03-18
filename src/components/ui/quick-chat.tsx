@@ -2,13 +2,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { ChatInput } from '@/components/ui/chat-input';
-import { chatAPI, ChatMessage } from '@/lib/api';
+import { chatAPI, ChatMessage, ChatSession } from '@/lib/api';
 import { ConversationPage } from '@/components/ui/conversation-page';
 import { ChatSettingsModal } from '@/components/ui/chat-settings-modal';
 
 interface QuickChatProps {
   sessionId?: string;
-  onSessionChange?: (s: any) => void;
+  onSessionChange?: (s: ChatSession) => void;
   className?: string;
 }
 
@@ -30,7 +30,7 @@ export function QuickChat({ sessionId: externalSessionId, onSessionChange, class
         try {
           const data = await api.getSession(externalSessionId);
           // Convert DB messages to ChatMessage format expected by UI helper
-          const msgs: ChatMessage[] = data.messages.map((m: any) => api.convertDbMessage(m));
+          const msgs: ChatMessage[] = data.messages.map((m: unknown) => api.convertDbMessage(m as Record<string, unknown>));
           setMessages(msgs);
         } catch (err) {
           console.error('Failed to load messages for session', err);
@@ -48,14 +48,14 @@ export function QuickChat({ sessionId: externalSessionId, onSessionChange, class
         const resp = await api.getModels();
         setGenerationModels(resp.generation_models||[]);
         if(resp.generation_models && resp.generation_models.length>0){
-          const def = resp.generation_models.find((m:string)=>m==='gemma3:12b-cloud');
+          const def = resp.generation_models.find((m:string)=>m==='gemma3:27b-cloud');
           setSelectedModel(def || resp.generation_models[0]);
         }
       }catch(e){console.warn('Failed to load models',e);}
     })();
   },[api]);
 
-  const sendMessage = async (content: string, _files?: any) => {
+  const sendMessage = async (content: string, _files?: unknown) => {
     if (!content.trim()) return;
 
     const userMsg: ChatMessage = {

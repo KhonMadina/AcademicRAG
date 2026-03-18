@@ -49,8 +49,8 @@ EMBEDDING_MODELS = [
 
 # Generation Models  
 GENERATION_MODELS = [
-    "gemma3:4b-cloud",  # Fast responses
-    "gemma3:12b-cloud",    # High quality
+    "gemma3:12b-cloud",  # Fast responses
+    "gemma3:27b-cloud",    # High quality
 ]
 ```
 
@@ -78,6 +78,22 @@ CHUNK_OVERLAP = 64         # Overlap between chunks
 
 ## 6. Operational Procedures
 
+### 6.0 Canonical Startup Path
+
+Use the unified launcher as the primary startup path:
+
+```bash
+python run_system.py
+```
+
+Useful launcher options:
+
+```bash
+python run_system.py --health
+python run_system.py --no-frontend
+python run_system.py --stop
+```
+
 ### 6.1 System Monitoring
 
 #### **Health Checks**
@@ -85,8 +101,10 @@ CHUNK_OVERLAP = 64         # Overlap between chunks
 # Comprehensive system check
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
 curl -f http://localhost:11434/api/tags && echo " Ollama OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 ```
 
 #### **Performance Monitoring**
@@ -145,8 +163,8 @@ pkill ollama
 ollama serve
 
 # Reinstall models
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
 ```
 
 ### 7.2 Performance Issues
@@ -160,7 +178,7 @@ vm_stat           # macOS
 # Solutions:
 # 1. Increase system RAM
 # 2. Reduce batch sizes in configuration
-# 3. Use smaller models (gemma3:4b-cloud instead of gemma3:12b-cloud)
+# 3. Use smaller models (gemma3:12b-cloud instead of gemma3:12b-cloud)
 ```
 
 #### **Slow Response Times**
@@ -239,3 +257,21 @@ Your deployment is successful when:
 - Memory usage: < 16GB total system memory
 
 ---
+
+## 10. Operations Runbook
+
+For day-2 operations (startup/shutdown, backup/restore, and incident response), use:
+
+- `Documentation/production_runbook.md`
+
+## 11. Limits and Capacity
+
+For practical limits and tuning guardrails (file sizes, memory, latency, and retrieval knobs), use:
+
+- `Documentation/known_limits_capacity_guide.md`
+
+## 12. Release Checklist and Dry Run
+
+For release gating and smoke-validation evidence, use:
+
+- `Documentation/release_checklist_dry_run.md`

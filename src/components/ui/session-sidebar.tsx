@@ -6,6 +6,7 @@ import { Plus, MessageSquare, MoreVertical, MailOpen, SquarePen, Trash2, ArrowBi
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ChatSession, chatAPI } from "@/lib/api"
+import Swal from "sweetalert2"
 
 interface SessionSidebarRef {
   refreshSessions: () => Promise<void>
@@ -32,6 +33,7 @@ export function SessionSidebar({
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
+  const sessionsLoadInFlightRef = React.useRef<Promise<void> | null>(null)
 
   // Load sessions on mount
   useEffect(() => {
@@ -39,15 +41,30 @@ export function SessionSidebar({
   }, [])
 
   const loadSessions = React.useCallback(async () => {
+    if (sessionsLoadInFlightRef.current) {
+      return sessionsLoadInFlightRef.current
+    }
+
+    const request = (async () => {
+      try {
+        setError(null)
+        const response = await chatAPI.getSessions()
+        setSessions(response.sessions)
+      } catch (error) {
+        console.error('Failed to load sessions:', error)
+        setError('Failed to load sessions')
+      } finally {
+        setIsLoading(false)
+      }
+    })()
+
+    sessionsLoadInFlightRef.current = request
     try {
-      setError(null)
-      const response = await chatAPI.getSessions()
-      setSessions(response.sessions)
-    } catch (error) {
-      console.error('Failed to load sessions:', error)
-      setError('Failed to load sessions')
+      await request
     } finally {
-      setIsLoading(false)
+      if (sessionsLoadInFlightRef.current === request) {
+        sessionsLoadInFlightRef.current = null
+      }
     }
   }, [])
 
@@ -71,7 +88,19 @@ export function SessionSidebar({
   const handleDeleteSession = async (sessionId: string, event: React.MouseEvent) => {
     event.stopPropagation() // Prevent session selection when clicking delete
 
-    if (!confirm('Are you sure you want to delete this conversation? This action cannot be undone.')) {
+    const confirmDelete = await Swal.fire({
+      title: 'Delete conversation?',
+      text: 'Are you sure you want to delete this conversation? This action cannot be undone.',
+      icon: 'warning',
+      heightAuto: false,
+      showCancelButton: true,
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel',
+      confirmButtonColor: '#991b1b',
+      cancelButtonColor: '#374151',
+    })
+
+    if (!confirmDelete.isConfirmed) {
       return
     }
 
@@ -90,24 +119,51 @@ export function SessionSidebar({
   }
 
   const handleRenameSession = async (sessionId: string, event: React.MouseEvent) => {
-    event.stopPropagation();
-    const current = sessions.find(s => s.id === sessionId);
-    const newTitle = prompt('Enter new title', current?.title || '');
-    if (!newTitle || newTitle.trim() === '' || newTitle === current?.title) {
-      return;
+    event.stopPropagation()
+    const current = sessions.find(s => s.id === sessionId)
+
+    const renamePrompt = await Swal.fire<string>({
+      title: 'Rename conversation',
+      input: 'text',
+      inputValue: current?.title || '',
+      inputLabel: 'Conversation title',
+      inputPlaceholder: 'Enter new title',
+      showCancelButton: true,
+      heightAuto: false,
+      confirmButtonText: 'Save',
+      cancelButtonText: 'Cancel',
+      confirmButtonColor: '#008236',
+      cancelButtonColor: '#9f0712',
+      inputValidator: (value) => {
+        if (!value || value.trim() === '') {
+          return 'Title cannot be empty'
+        }
+        return null
+      },
+    })
+
+    if (!renamePrompt.isConfirmed || !renamePrompt.value) {
+      return
     }
+
+    const trimmedTitle = renamePrompt.value.trim()
+    if (!trimmedTitle || trimmedTitle === current?.title) {
+      setMenuOpenId(null)
+      return
+    }
+
     try {
-      const result = await chatAPI.renameSession(sessionId, newTitle.trim());
+      const result = await chatAPI.renameSession(sessionId, trimmedTitle)
       // Update local state with new session data
-      setSessions(prev => prev.map(s => s.id === sessionId ? result.session : s));
+      setSessions(prev => prev.map(s => s.id === sessionId ? result.session : s))
       // If this is the currently open session, notify parent to refresh
       if (currentSessionId === sessionId && onSessionSelect) {
-        onSessionSelect(sessionId);
+        onSessionSelect(sessionId)
       }
-      setMenuOpenId(null);
+      setMenuOpenId(null)
     } catch (error) {
-      console.error('Failed to rename session:', error);
-      setError('Failed to rename session');
+      console.error('Failed to rename session:', error)
+      setError('Failed to rename session')
     }
   }
 
@@ -138,7 +194,7 @@ export function SessionSidebar({
           <Button
             onClick={handleNewSession}
             size="sm"
-            className="h-6 w-7 p-0 bg-transparent hover:bg-black/10 text-black/80"
+            className="h-6 w-7 p-0 bg-transparent hover:bg-black/10 text-black/80 hover:cursor-pointer"
             title="Return to Home"
           >
             <SquareArrowLeft className="size-5" />
@@ -179,9 +235,9 @@ export function SessionSidebar({
               {sessions.filter(session => session.message_count > 0).map((session) => (
                 <div
                   key={session.id}
-                  className={`relative group pl-1 rounded transition-colors ${currentSessionId === session.id 
+                  className={`relative group pl-1 rounded transition-colors mb-1 ${currentSessionId === session.id 
                     ? 'bg-black/50  text-white border-l-2 border-white'
-                    : 'hover:bg-black/10 bg-black/5 mb-1'
+                    : 'hover:bg-black/10 bg-black/5'
                     }`}
                 >
                   <button

@@ -7,6 +7,7 @@
 | Endpoint | Method | Description | Request Body | Success Response |
 |----------|--------|-------------|--------------|------------------|
 | `/health` | GET | Health probe incl. Ollama status & DB stats |  | 200 JSON `{ status, ollama_running, available_models, database_stats }` |
+| `/metrics` | GET | Lightweight in-memory service metrics |  | 200 JSON `{ uptime_s, requests:{...}, indexing:{...} }` |
 | `/chat` | POST | Stateless chat (no session) | `{ message:str, model?:str, conversation_history?:[{role,content}]}` | 200 `{ response:str, model:str, message_count:int }` |
 | `/sessions` | GET | List all sessions |  | `{ sessions:ChatSession[], total:int }` |
 | `/sessions` | POST | Create session | `{ title?:str, model?:str }` | 201 `{ session:ChatSession, session_id }` |
@@ -37,8 +38,40 @@
 |----------|--------|-------------|--------------|------------------|
 | `/chat` | POST | Run RAG query with full pipeline | See RAG ChatRequest  | `{ answer:str, source_documents:[], reasoning?:str, confidence?:float }` |
 | `/chat/stream` | POST | Run RAG query with SSE streaming | Same as /chat | Server-Sent Events stream |
+| `/metrics` | GET | Lightweight in-memory service metrics + semantic cache stats |  | 200 JSON `{ uptime_s, requests:{...}, indexing:{...}, semantic_cache:{...} }` |
+| `/retrieval/diagnostics` | POST | Inspect retrieval ranking before/after rerank | See Retrieval Diagnostics Request | `{ query, table_name, retrieval:{ pre_rerank:[], post_rerank:[], ... } }` |
 | `/index` | POST | Index documents with full configuration | See Index Request  | `{ message:str, indexed_files:[], table_name:str }` |
 | `/models` | GET | List available models |  | `{ generation_models:str[], embedding_models:str[] }` |
+
+### Lightweight Metrics Response (summary)
+```jsonc
+{
+  "uptime_s": 123.45,
+  "requests": {
+    "total": 42,
+    "by_status": { "2xx": 40, "4xx": 1, "5xx": 1 },
+    "by_endpoint": {
+      "GET /health": { "count": 10, "avg_ms": 3.2, "max_ms": 7.1, "4xx": 0, "5xx": 0 }
+    }
+  },
+  "indexing": {
+    "count": 3,
+    "success": 2,
+    "failed": 1,
+    "avg_duration_ms": 15234.9,
+    "max_duration_ms": 20311.4,
+    "last_duration_ms": 9811.0
+  },
+  "semantic_cache": {
+    "lookups": 27,
+    "hits": 9,
+    "misses": 18,
+    "hit_rate": 0.3333,
+    "scope": "global",
+    "threshold": 0.98
+  }
+}
+```
 
 ### RAG ChatRequest (Advanced Options)
 ```jsonc
@@ -76,10 +109,25 @@
   "window_size": 2,                           // Optional  context window
   "enable_enrich": true,                      // Optional  enable enrichment
   "embedding_model": "Qwen/Qwen3-Embedding-0.6B",  // Optional  embedding model
-  "enrich_model": "gemma3:4b-cloud",               // Optional  enrichment model
-  "overview_model_name": "gemma3:4b-cloud",        // Optional  overview model
+  "enrich_model": "gemma3:12b-cloud",               // Optional  enrichment model
+  "overview_model_name": "gemma3:12b-cloud",        // Optional  overview model
   "batch_size_embed": 50,                     // Optional  embedding batch size
   "batch_size_enrich": 25                     // Optional  enrichment batch size
+}
+```
+
+### Retrieval Diagnostics Request
+```jsonc
+{
+  "query": "string",              // Required
+  "session_id": "string",         // Optional (resolves linked table)
+  "table_name": "string",         // Optional explicit table override
+  "retrieval_k": 20,               // Optional total chunks retrieved pre-rerank
+  "pre_rerank_k": 10,              // Optional top-k included in pre_rerank output
+  "post_rerank_k": 10,             // Optional top-k included in post_rerank output
+  "search_type": "hybrid",        // Optional retrieval mode override
+  "dense_weight": 0.7,             // Optional dense-vs-lexical fusion weight
+  "ai_rerank": true                // Optional force enable/disable AI reranking
 }
 ```
 
@@ -146,8 +194,8 @@ The React/Next.js frontend calls the backend via a typed wrapper. Important meth
   "windowSize": 2,
   "enableEnrich": true,
   "embeddingModel": "Qwen/Qwen3-Embedding-0.6B",
-  "enrichModel": "gemma3:4b-cloud",
-  "overviewModel": "gemma3:4b-cloud",
+  "enrichModel": "gemma3:12b-cloud",
+  "overviewModel": "gemma3:12b-cloud",
   "batchSizeEmbed": 64,
   "batchSizeEnrich": 32
 }

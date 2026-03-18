@@ -24,7 +24,7 @@ flowchart TD
 ## Steps in Detail
 | Step | Module | Key Classes | Notes |
 |------|--------|------------|-------|
-| Conversion | `ingestion/pdf_converter.py` | `PDFConverter` | Uses `Docling` library to extract text with structure preservation. |
+| Conversion | `ingestion/document_converter.py` | `DocumentConverter` | Uses `Docling` first, with memory-safe PDF fallback when needed. |
 | Chunking | `ingestion/chunking.py`, `indexing/latechunk.py`, `ingestion/docling_chunker.py` | `MarkdownRecursiveChunker`, `DoclingChunker` | Controlled by flags `latechunk`, `doclingChunk`, `chunkSize`, `chunkOverlap`. |
 | Contextual Enrichment | `indexing/contextualizer.py` | `ContextualEnricher` | Generates per-chunk summaries (LLM call). |
 | Embedding | `indexing/embedders.py`, `indexing/representations.py` | `QwenEmbedder`, `EmbeddingGenerator` | Batch size tunable (`batchSizeEmbed`). Uses Qwen3-Embedding models. |
@@ -44,12 +44,33 @@ flowchart TD
 | `chunkSize` / `chunkOverlap` | Standard fixed slicing | 512 / 64 |
 | `enableEnrich` | Run contextual summaries | true |
 | `embeddingModel` | Override embedder | `Qwen/Qwen3-Embedding-0.6B` |
-| `overviewModel` | Model used in `OverviewBuilder` | `gemma3:4b-cloud` |
+| `overviewModel` | Model used in `OverviewBuilder` | `gemma3:12b-cloud` |
 | `batchSizeEmbed / Enrich` | Batch sizes | 50 / 25 |
+
+## PDF Memory Guard (Docling OOM Protection)
+
+To reduce indexing failures such as `std::bad_alloc` during Docling preprocess, PDF conversion now includes:
+
+1. **Proactive large-PDF bypass**: skips Docling and uses lightweight PyMuPDF extraction when file size or page count is high.
+2. **Reactive fallback**: if Docling throws during conversion, automatically falls back to PyMuPDF extraction.
+3. **Lower OCR memory pressure**: OCR runs with non-full-page mode (`force_full_page_ocr=False`).
+
+### Environment Variables
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RAG_LARGE_PDF_SIZE_MB` | Bypass Docling when PDF size is at/above this threshold (MB). | `40` |
+| `RAG_LARGE_PDF_PAGE_THRESHOLD` | Bypass Docling when page count is at/above this threshold. | `150` |
+
+### Runtime Metadata
+When fallback extraction is used, conversion metadata includes:
+- `conversion_method: pymupdf_fallback`
+- `page_count`
+- `text_pages`
 
 ## Error Handling
 * Duplicate LanceDB table  now idempotent (commit `af99b38`).
-* Failed PDF parse  chunker skips file, logs warning.
+* Failed PDF parse in Docling  converter auto-falls back to PyMuPDF extraction.
+* Large PDF detected by guard thresholds  converter bypasses Docling pre-process to avoid OOM.
 
 ## Extension Ideas
 * Add OCR layer before PDF conversion.
@@ -287,7 +308,7 @@ def _generate_context_summary(self, chunk_text: str, surrounding_context: str) -
     
     response = self.llm_client.complete(
         prompt=prompt,
-        model=self.ollama_config["enrichment_model"]  # gemma3:4b-cloud
+        model=self.ollama_config["enrichment_model"]  # gemma3:12b-cloud
     )
     
     return response.strip()
@@ -303,7 +324,7 @@ def select_embedder(model_name: str, ollama_host: str = None):
         return QwenEmbedder(model_name=model_name)
     elif "bge-" in model_name:
         return BGEEmbedder(model_name=model_name)
-    elif ollama_host and model_name in ["nomic-embed-text"]:
+    elif ollama_host and model_name in ["nomic-embed-text:v1.5"]:
         return OllamaEmbedder(model_name=model_name, host=ollama_host)
     else:
         # Default to embedder
@@ -409,7 +430,7 @@ class OverviewBuilder:
         
         overview = self.llm_client.complete(
             prompt=overview_prompt,
-            model=self.overview_model  # gemma3:4b-cloud for speed
+            model=self.overview_model  # gemma3:12b-cloud for speed
         )
         
         return {
@@ -558,13 +579,13 @@ DEFAULT_CONFIG = {
     },
     "enrichment": {
         "enabled": True,
-        "model": "gemma3:4b-cloud",
+        "model": "gemma3:12b-cloud",
         "batch_size": 16
     },
     "overview": {
         "enabled": True,
         "max_chunks": 5,
-        "model": "gemma3:4b-cloud"
+        "model": "gemma3:12b-cloud"
     },
     "storage": {
         "create_index": True,
@@ -609,7 +630,7 @@ class IndexingPipeline:
 - DocLing-based PDF processing with OCR fallback
 - Multiple chunking strategies (DocLing, Recursive, Fixed-size)
 - Qwen3-Embedding-0.6B integration
-- Contextual enrichment with gemma3:4b-cloud
+- Contextual enrichment with gemma3:12b-cloud
 - LanceDB storage with vector indexing
 - Overview generation for query routing
 - Batch processing and parallel execution

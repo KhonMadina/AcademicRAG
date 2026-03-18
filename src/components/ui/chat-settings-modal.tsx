@@ -58,7 +58,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
       case 'toggle':
         return (
           <div key={opt.label} className="flex items-center justify-between">
-            <span className="text-sm text-gray-300 flex items-center gap-1 whitespace-nowrap">
+            <span className="text-sm  flex items-center gap-1 whitespace-nowrap">
               {displayName(opt.label)}
               {optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}
             </span>
@@ -70,8 +70,8 @@ export function ChatSettingsModal({ options, onClose }: Props) {
         return (
           <div key={opt.label} className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-300 flex items-center gap-1">{displayName(opt.label)}{optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}</span>
-              <span className="text-sm text-gray-400">
+              <span className="text-sm flex items-center gap-1">{displayName(opt.label)}{optionHelp[displayName(opt.label)] && <InfoTooltip text={optionHelp[displayName(opt.label)]} size={12} />}</span>
+              <span className="text-sm ">
                 {opt.value}{opt.unit || ''}
               </span>
             </div>
@@ -101,7 +101,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
             <select
               value={opt.value}
               onChange={(e) => opt.setter(e.target.value)}
-              className="w-full px-3 py-2 bg-white/50 border border-black/30 rounded-lg  text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 "
+              className="w-full px-3 py-2 bg-white/50 border border-black/30 rounded-lg  text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 hover:cursor-pointer"
             >
               {opt.options.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -161,8 +161,8 @@ export function ChatSettingsModal({ options, onClose }: Props) {
   );
 
   return (
-    <div className="fixed inset-0 backdrop-blur-lg flex items-center justify-center z-50 p-4">
-      <div className="rounded-xl w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth p-6 space-y-6 border border-black/10 shadow-2xl">
+    <div className="fixed  inset-0 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="rounded-xl bg-white/80 backdrop-blur w-full max-w-3xl max-h-full overflow-y-auto scroll-smooth p-6 space-y-6 border border-black/20 shadow-2xl">
         <h2 className="text-lg font-semibold mb-6">Chat Settings</h2>
 
         <div className="space-y-6">
@@ -204,7 +204,7 @@ export function ChatSettingsModal({ options, onClose }: Props) {
         <div className="flex justify-end pt-6 border-t border-white/10 mt-6">
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm text-white"
+            className="px-4 py-2 bg-red-800/80 rounded hover:bg-red-800 text-sm text-white hover:cursor-pointer"
           >
             Close
           </button>

@@ -1,6 +1,9 @@
 import requests
 import json
 from typing import List, Dict, Any
+import os
+import time
+import threading
 import base64
 from io import BytesIO
 from PIL import Image
@@ -13,7 +16,72 @@ class OllamaClient:
     def __init__(self, host: str = "http://localhost:11434"):
         self.host = host
         self.api_url = f"{host}/api"
+        self.session = requests.Session()
+
+        self.request_timeout = int(os.getenv("OLLAMA_REQUEST_TIMEOUT_SEC", "60"))
+        self.max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+        self.retry_backoff_sec = float(os.getenv("OLLAMA_RETRY_BACKOFF_SEC", "1.5"))
+        self.circuit_breaker_threshold = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_THRESHOLD", "5"))
+        self.circuit_breaker_reset_sec = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_RESET_SEC", "30"))
+
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
+        self._state_lock = threading.Lock()
         # (Connection check remains the same)
+
+    def _is_circuit_open(self) -> bool:
+        with self._state_lock:
+            return time.time() < self._circuit_open_until
+
+    def _record_success(self):
+        with self._state_lock:
+            self._failure_count = 0
+            self._circuit_open_until = 0.0
+
+    def _record_failure(self):
+        with self._state_lock:
+            self._failure_count += 1
+            if self._failure_count >= self.circuit_breaker_threshold:
+                self._circuit_open_until = time.time() + self.circuit_breaker_reset_sec
+
+    def _request_with_resilience(self, method: str, endpoint: str, timeout: int | None = None, **kwargs):
+        if self._is_circuit_open():
+            raise RuntimeError("Ollama circuit breaker is open. Please retry shortly.")
+
+        url = f"{self.api_url}/{endpoint.lstrip('/')}"
+        max_attempts = self.max_retries + 1
+        last_error = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    timeout=timeout or self.request_timeout,
+                    **kwargs,
+                )
+
+                if 500 <= response.status_code < 600:
+                    raise requests.exceptions.HTTPError(
+                        f"Transient Ollama server error: {response.status_code}",
+                        response=response,
+                    )
+
+                self._record_success()
+                return response
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
+                last_error = e
+                self._record_failure()
+                if attempt < max_attempts and not self._is_circuit_open():
+                    time.sleep(self.retry_backoff_sec * attempt)
+                    continue
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                self._record_failure()
+                break
+
+        raise RuntimeError(f"Ollama request failed after {max_attempts} attempts: {last_error}")
 
     def _image_to_base64(self, image: Image.Image) -> str:
         """Converts a Pillow Image to a base64 string."""
@@ -21,15 +89,30 @@ class OllamaClient:
         image.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+    def _supports_chat_template_kwargs(self, model: str) -> bool:
+        """Best-effort check: only some families reliably support chat_template_kwargs."""
+        model_lc = (model or "").lower()
+        return any(name in model_lc for name in ("qwen", "deepseek"))
+
+    def _error_text(self, response: requests.Response | None) -> str:
+        if response is None:
+            return ""
+        try:
+            text = response.text or ""
+            return text[:500]
+        except Exception:
+            return ""
+
     def generate_embedding(self, model: str, text: str) -> List[float]:
         try:
-            response = requests.post(
-                f"{self.api_url}/embeddings",
+            response = self._request_with_resilience(
+                "POST",
+                "embeddings",
                 json={"model": model, "prompt": text}
             )
             response.raise_for_status()
             return response.json().get("embedding", [])
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"Error generating embedding: {e}")
             return []
 
@@ -65,21 +148,38 @@ class OllamaClient:
                 payload["images"] = [self._image_to_base64(img) for img in images]
 
             # Optional: disable thinking mode for Qwen3 / DeepSeek models
-            if enable_thinking is not None:
+            if enable_thinking is not None and self._supports_chat_template_kwargs(model):
                 payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
-            response = requests.post(
-                f"{self.api_url}/generate",
-                json=payload
-            )
-            response.raise_for_status()
+            response = self._request_with_resilience("POST", "generate", json=payload)
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # Compatibility fallback: some Ollama/model combinations reject chat_template_kwargs
+                if (
+                    response.status_code == 400
+                    and "chat_template_kwargs" in payload
+                ):
+                    fallback_payload = payload.copy()
+                    fallback_payload.pop("chat_template_kwargs", None)
+                    response = self._request_with_resilience("POST", "generate", json=fallback_payload)
+                    response.raise_for_status()
+                else:
+                    raise e
+
             response_lines = response.text.strip().split('\n')
             final_response = json.loads(response_lines[-1])
             return final_response
 
         except requests.exceptions.RequestException as e:
-            print(f"Error generating completion: {e}")
-            return {}
+            resp = getattr(e, "response", None)
+            detail = self._error_text(resp)
+            print(f"Error generating completion: {e}; response={detail}")
+            return {
+                "response": "",
+                "error": detail or str(e),
+                "status_code": getattr(resp, "status_code", None),
+            }
 
     # -------------------------------------------------------------
     # Async variant  uses httpx so the caller can await multiple
@@ -103,15 +203,33 @@ class OllamaClient:
         if images:
             payload["images"] = [self._image_to_base64(img) for img in images]
 
-        if enable_thinking is not None:
+        if enable_thinking is not None and self._supports_chat_template_kwargs(model):
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+
+        if self._is_circuit_open():
+            print("Async Ollama completion blocked: circuit breaker is open")
+            return {}
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(f"{self.api_url}/generate", json=payload)
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    if resp.status_code == 400 and "chat_template_kwargs" in payload:
+                        fallback_payload = payload.copy()
+                        fallback_payload.pop("chat_template_kwargs", None)
+                        resp = await client.post(f"{self.api_url}/generate", json=fallback_payload)
+                        resp.raise_for_status()
+                    else:
+                        raise e
+                if 500 <= resp.status_code < 600:
+                    self._record_failure()
+                    raise httpx.HTTPStatusError("Transient Ollama server error", request=resp.request, response=resp)
+                self._record_success()
                 return json.loads(resp.text.strip().split("\n")[-1])
         except (httpx.HTTPError, asyncio.CancelledError) as e:
+            self._record_failure()
             print(f"Async Ollama completion error: {e}")
             return {}
 
@@ -136,10 +254,10 @@ class OllamaClient:
         payload: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
         if images:
             payload["images"] = [self._image_to_base64(img) for img in images]
-        if enable_thinking is not None:
+        if enable_thinking is not None and self._supports_chat_template_kwargs(model):
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
-        with requests.post(f"{self.api_url}/generate", json=payload, stream=True) as resp:
+        with self._request_with_resilience("POST", "generate", json=payload, stream=True) as resp:
             resp.raise_for_status()
             for raw_line in resp.iter_lines():
                 if not raw_line:

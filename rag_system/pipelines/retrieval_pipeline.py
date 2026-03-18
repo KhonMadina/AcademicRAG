@@ -4,11 +4,14 @@ from PIL import Image
 import concurrent.futures
 import time
 import json
+import re
 import lancedb
 import logging
 import math
+import hashlib
 import numpy as np
 from threading import Lock
+from collections import defaultdict
 
 from rag_system.utils.ollama_client import OllamaClient
 from rag_system.retrieval.retrievers import MultiVectorRetriever, GraphRetriever
@@ -50,7 +53,10 @@ class RetrievalPipeline:
         self.ollama_client = ollama_client
         
         # Support both legacy "retrievers" key and newer "retrieval" key
-        self.retriever_configs = self.config.get("retrievers") or self.config.get("retrieval", {})
+        self.retriever_configs = dict(self.config.get("retrievers") or self.config.get("retrieval", {}))
+        if "latechunk" not in self.retriever_configs and "late_chunking" in self.retriever_configs:
+            self.retriever_configs["latechunk"] = self.retriever_configs["late_chunking"]
+        self.latechunk_cfg = self.retriever_configs.get("latechunk", {})
         self.storage_config = self.config["storage"]
         
         # Defer initialization to just-in-time methods
@@ -62,6 +68,190 @@ class RetrievalPipeline:
         self._graph_retriever = None
         self.reranker = None
         self.ai_reranker = None
+        self._chunk_window_cache: Dict[tuple, List[Dict[str, Any]]] = {}
+        perf_cfg = self.config.get("performance", {})
+        query_cache_cfg = perf_cfg.get("query_result_cache", {}) if isinstance(perf_cfg, dict) else {}
+        self._query_result_cache_enabled = bool(query_cache_cfg.get("enabled", False))
+        self._query_result_cache_ttl_seconds = int(query_cache_cfg.get("ttl_seconds", 120))
+        self._query_result_cache_max_entries = int(query_cache_cfg.get("max_entries", 256))
+        self._query_result_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _build_query_cache_key(self, query: str, table_name: str | None) -> str:
+        search_type = self.retriever_configs.get("search_type", "hybrid")
+        dense_weight = float(
+            self.retriever_configs.get("dense", {}).get(
+                "weight", self.config.get("fusion", {}).get("vec_weight", 0.5)
+            )
+        )
+        reranker_cfg = self.config.get("reranker", {})
+        payload = {
+            "query": query,
+            "table_name": table_name or self.storage_config.get("text_table_name"),
+            "retrieval_k": int(self.config.get("retrieval_k", 10)),
+            "search_type": search_type,
+            "dense_weight": round(min(max(dense_weight, 0.0), 1.0), 4),
+            "ai_rerank": bool(reranker_cfg.get("enabled", False)),
+            "reranker_top_k": reranker_cfg.get("top_k"),
+            "context_window_size": int(self.config.get("context_window_size", 0)),
+        }
+        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _get_cached_query_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        if not self._query_result_cache_enabled:
+            return None
+        cached = self._query_result_cache.get(cache_key)
+        if not cached:
+            return None
+        age_seconds = time.time() - float(cached.get("ts", 0.0))
+        if age_seconds > self._query_result_cache_ttl_seconds:
+            self._query_result_cache.pop(cache_key, None)
+            return None
+        result = cached.get("result") or {}
+        return {
+            "answer": result.get("answer", ""),
+            "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
+        }
+
+    def _store_cached_query_result(self, cache_key: str, result: Dict[str, Any]) -> None:
+        if not self._query_result_cache_enabled:
+            return
+        if len(self._query_result_cache) >= self._query_result_cache_max_entries:
+            oldest_key = min(self._query_result_cache.items(), key=lambda item: float(item[1].get("ts", 0.0)))[0]
+            self._query_result_cache.pop(oldest_key, None)
+        self._query_result_cache[cache_key] = {
+            "ts": time.time(),
+            "result": {
+                "answer": result.get("answer", ""),
+                "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
+            },
+        }
+
+    def _get_text_table_name(self) -> str:
+        return self.storage_config.get("text_table_name") or self.config["storage"].get("text_table_name")
+
+    def _parse_metadata_payload(self, raw_metadata: Any) -> Dict[str, Any]:
+        if isinstance(raw_metadata, dict):
+            parsed = raw_metadata
+        elif isinstance(raw_metadata, str):
+            try:
+                parsed = json.loads(raw_metadata)
+            except json.JSONDecodeError:
+                return {}
+        else:
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        nested = parsed.get("metadata")
+        if isinstance(nested, dict):
+            merged = nested.copy()
+            if parsed.get("text") and "original_text" not in merged:
+                merged["original_text"] = parsed["text"]
+            for key in ("document_id", "chunk_index", "chunk_id", "document_title", "title"):
+                if key in parsed and key not in merged:
+                    merged[key] = parsed[key]
+            return merged
+
+        return parsed.copy()
+
+    def _normalize_chunk_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(record)
+        metadata = self._parse_metadata_payload(normalized.get("metadata"))
+        normalized["metadata"] = metadata
+        normalized["document_id"] = normalized.get("document_id") or metadata.get("document_id")
+        normalized["chunk_index"] = normalized.get("chunk_index") if normalized.get("chunk_index") is not None else metadata.get("chunk_index", -1)
+        normalized["chunk_id"] = normalized.get("chunk_id") or metadata.get("chunk_id")
+        normalized["text"] = metadata.get("original_text") or normalized.get("text") or ""
+        return normalized
+
+    def _get_document_chunk_span_lancedb(self, document_id: str, start_index: int, end_index: int, table_name: str | None = None) -> List[Dict[str, Any]]:
+        db_manager = self._get_db_manager()
+        if not db_manager or not document_id:
+            return []
+
+        active_table = table_name or self._get_text_table_name()
+        if not active_table:
+            return []
+
+        start_index = max(0, int(start_index))
+        end_index = max(start_index, int(end_index))
+        cache_key = (active_table, document_id, start_index, end_index)
+        cached = self._chunk_window_cache.get(cache_key)
+        if cached is not None:
+            return [dict(chunk) for chunk in cached]
+
+        try:
+            tbl = db_manager.get_table(active_table)
+        except Exception:
+            return []
+
+        sql_filter = (
+            f"document_id = {json.dumps(document_id)} "
+            f"AND chunk_index >= {start_index} AND chunk_index <= {end_index}"
+        )
+
+        try:
+            results = tbl.search().where(sql_filter).to_list()
+            normalized = [self._normalize_chunk_record(result) for result in results]
+            normalized.sort(key=lambda chunk: chunk.get("chunk_index", 0))
+            self._chunk_window_cache[cache_key] = normalized
+            return [dict(chunk) for chunk in normalized]
+        except Exception:
+            return []
+
+    def _expand_context_chunks(self, chunks: List[Dict[str, Any]], window_size: int) -> List[Dict[str, Any]]:
+        if not chunks:
+            return []
+
+        expanded_chunks: Dict[str, Dict[str, Any]] = {}
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        for chunk in chunks:
+            document_id = chunk.get("document_id")
+            chunk_index = chunk.get("chunk_index")
+            if document_id is None or chunk_index is None or chunk_index == -1:
+                chunk_id = chunk.get("chunk_id") or f"fallback:{len(expanded_chunks)}"
+                expanded_chunks[chunk_id] = chunk
+                continue
+            grouped[str(document_id)].append(chunk)
+
+        for document_id, doc_chunks in grouped.items():
+            indices = [int(chunk.get("chunk_index", -1)) for chunk in doc_chunks if chunk.get("chunk_index") is not None]
+            if not indices:
+                continue
+
+            span_start = max(0, min(indices) - window_size)
+            span_end = max(indices) + window_size
+            span_chunks = self._get_document_chunk_span_lancedb(document_id, span_start, span_end)
+            chunks_by_index = {chunk.get("chunk_index"): chunk for chunk in span_chunks}
+
+            for seed_chunk in doc_chunks:
+                center_index = seed_chunk.get("chunk_index")
+                if center_index is None:
+                    continue
+                for idx in range(max(0, int(center_index) - window_size), int(center_index) + window_size + 1):
+                    surrounding_chunk = chunks_by_index.get(idx)
+                    if not surrounding_chunk:
+                        continue
+                    cid = surrounding_chunk.get("chunk_id") or f"{document_id}:{idx}"
+                    if cid not in expanded_chunks:
+                        chunk_copy = dict(surrounding_chunk)
+                        if cid == seed_chunk.get("chunk_id") and "rerank_score" in seed_chunk:
+                            chunk_copy["rerank_score"] = seed_chunk["rerank_score"]
+                        expanded_chunks[cid] = chunk_copy
+
+        final_docs = list(expanded_chunks.values())
+        if any('rerank_score' in d for d in final_docs):
+            final_docs.sort(key=lambda c: c.get('rerank_score', -1), reverse=True)
+        elif any('_distance' in d for d in final_docs):
+            final_docs.sort(key=lambda c: c.get('_distance', 1e9))
+        elif any('score' in d for d in final_docs):
+            final_docs.sort(key=lambda c: c.get('score', 0), reverse=True)
+        else:
+            final_docs.sort(key=lambda c: (c.get('document_id', ''), c.get('chunk_index', 0)))
+        return final_docs
 
     def _get_db_manager(self):
         if self.db_manager is None:
@@ -76,7 +266,7 @@ class RetrievalPipeline:
         if self.text_embedder is None:
             from rag_system.indexing.representations import select_embedder
             self.text_embedder = select_embedder(
-                self.config.get("embedding_model_name", "BAAI/bge-small-en-v1.5"),
+                self.config.get("embedding_model_name", "nomic-embed-text:v1.5"),
                 self.ollama_config.get("host") if isinstance(self.ollama_config, dict) else None,
             )
         return self.text_embedder
@@ -104,17 +294,12 @@ class RetrievalPipeline:
         return self.dense_retriever
 
     def _get_bm25_retriever(self):
-        if self.bm25_retriever is None and self.retriever_configs.get("bm25", {}).get("enabled"):
-            try:
-                print(f" Lazily initializing BM25 retriever...")
-                self.bm25_retriever = BM25Retriever(
-                    index_path=self.storage_config["bm25_path"],
-                    index_name=self.retriever_configs["bm25"]["index_name"]
-                )
-                print(" BM25 retriever initialized successfully")
-            except Exception as e:
-                print(f" Failed to initialize BM25 retriever on demand: {e}")
-                # Keep it None so we don't try again
+        # Legacy compatibility: standalone lexical retriever was removed in favor of
+        # LanceDB native FTS inside MultiVectorRetriever.
+        if self.retriever_configs.get("bm25", {}).get("enabled"):
+            logging.getLogger(__name__).debug(
+                "Standalone BM25 retriever is deprecated; using LanceDB FTS via MultiVectorRetriever."
+            )
         return self.bm25_retriever
 
     def _get_graph_retriever(self):
@@ -171,50 +356,16 @@ class RetrievalPipeline:
         """
         Retrieves a window of chunks around a central chunk using LanceDB.
         """
-        db_manager = self._get_db_manager()
-        if not db_manager:
-            return [chunk]
-
-        # Extract identifiers needed for the query
         document_id = chunk.get("document_id")
         chunk_index = chunk.get("chunk_index")
 
         # If essential identifiers are missing, return the chunk itself
         if document_id is None or chunk_index is None or chunk_index == -1:
             return [chunk]
-
-        table_name = self.config["storage"]["text_table_name"]
-        try:
-            tbl = db_manager.get_table(table_name)
-        except Exception:
-            # If the table can't be opened, we can't get surrounding chunks
-            return [chunk]
-
-        # Define the window for the search
         start_index = max(0, chunk_index - window_size)
         end_index = chunk_index + window_size
-        
-        # Construct the SQL filter for an efficient metadata-based search
-        sql_filter = f"document_id = '{document_id}' AND chunk_index >= {start_index} AND chunk_index <= {end_index}"
-        
-        try:
-            # Execute a filter-only search, which is very fast on indexed metadata
-            results = tbl.search().where(sql_filter).to_list()
-            
-            # The results must be sorted by chunk_index to maintain logical order
-            results.sort(key=lambda c: c['chunk_index'])
-
-            # The 'metadata' field is a JSON string and needs to be parsed
-            for res in results:
-                if isinstance(res.get('metadata'), str):
-                    try:
-                        res['metadata'] = json.loads(res['metadata'])
-                    except json.JSONDecodeError:
-                        res['metadata'] = {} # Handle corrupted metadata gracefully
-            return results
-        except Exception:
-            # If the query fails for any reason, fall back to the single chunk
-            return [chunk]
+        results = self._get_document_chunk_span_lancedb(str(document_id), start_index, end_index)
+        return results or [chunk]
 
     def _synthesize_final_answer(self, query: str, facts: str, *, event_callback=None) -> str:
         """Uses a text LLM to synthesize a final answer from extracted facts."""
@@ -226,17 +377,18 @@ Context you receive
  ORIGINAL QUESTION  the user's actual query.
 
 Instructions
-1. Evaluate each snippet for relevance to the ORIGINAL QUESTION; ignore those that do not help answer it.  
-2. Synthesise an answer **using only information from the relevant snippets**.  
-3. If snippets contradict one another, mention the contradiction explicitly.  
-4. If the snippets do not contain the needed information, reply exactly with:  
-   "I could not find that information in the provided documents."  
-5. Provide a thorough, well-structured answer. Use paragraphs or bullet points where helpful, and include any relevant numbers/names exactly as they appear. There is **no strict sentence limit**, but aim for clarity over brevity.  
-6. Do **not** introduce external knowledge unless step 4 applies; in that case you may add a clearly-labelled "General knowledge" sentence after the required statement.
+1. Evaluate each snippet for relevance to the ORIGINAL QUESTION; ignore those that do not help answer it.
+2. Synthesise an answer **using only information from the relevant snippets**.
+3. If snippets contradict one another, mention the contradiction explicitly.
+4. If the snippets do not contain the needed information, reply exactly with:
+    "I could not find that information in the provided documents."
+5. Every substantive claim must include at least one citation tag in the form `[S#]` where `#` maps to the Retrieved Snippet number.
+6. Keep citations precise: do not cite snippets that do not support the claim.
+7. Do **not** introduce external knowledge unless step 4 applies; in that case you may add one clearly-labelled "General knowledge" sentence after the required statement.
 
 Output format
-Answer:
-<your answer here>
+Return only the answer text as plain prose.
+Do not include section headers (e.g., "Answer:" or "Retrieved Snippets"), prompt text, or the snippets themselves.
 
   Retrieved Snippets  
 {facts}
@@ -254,260 +406,415 @@ ORIGINAL QUESTION: "{query}"
             if event_callback:
                 event_callback("token", {"text": tok})
 
-        return "".join(answer_parts)
+        raw_answer = "".join(answer_parts).strip()
+
+        # Defensive cleanup in case the model still echoes prompt scaffolding.
+        cleaned = re.sub(r"^\s*Answer\s*:\s*", "", raw_answer, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\n\s*Retrieved\s+Snippets\b[\s\S]*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        return cleaned or raw_answer
 
     def run(self, query: str, table_name: str = None, window_size_override: Optional[int] = None, event_callback=None) -> Dict[str, Any]:
-        start_time = time.time()
-        retrieval_k = self.config.get("retrieval_k", 10)
-
-        logger = logging.getLogger(__name__)
-        logger.debug("--- Running Hybrid Search for query '%s' (table=%s) ---", query, table_name or self.storage_config.get("text_table_name"))
-        
-        # If a custom table_name is provided, propagate it to storage config so helper methods use it
-        if table_name:
-            self.storage_config["text_table_name"] = table_name
-
-        if event_callback:
-            event_callback("retrieval_started", {})
-        # Unified retrieval using the refactored MultiVectorRetriever
-        dense_retriever = self._get_dense_retriever()
-        # Get the LanceDB reranker for initial score fusion
-        lancedb_reranker = self._get_reranker()
-        
-        retrieved_docs = []
-        if dense_retriever:
-            retrieved_docs = dense_retriever.retrieve(
-                text_query=query,
-                table_name=table_name or self.storage_config["text_table_name"],
-                k=retrieval_k,
-                reranker=lancedb_reranker # Pass the reranker to enable hybrid search
-            )
-
-        # ---------------------------------------------------------------
-        # Late-Chunk retrieval (optional)
-        # ---------------------------------------------------------------
-        if self.retriever_configs.get("latechunk", {}).get("enabled"):
-            lc_table = self.retriever_configs["latechunk"].get("lancedb_table_name")
-            if lc_table:
-                try:
-                    lc_docs = dense_retriever.retrieve(
-                        text_query=query,
-                        table_name=lc_table,
-                        k=retrieval_k,
-                        reranker=lancedb_reranker,
-                    )
-                    retrieved_docs.extend(lc_docs)
-                except Exception as e:
-                    print(f"  Late-chunk retrieval failed: {e}")
-
-        if event_callback:
-            event_callback("retrieval_done", {"count": len(retrieved_docs)})
-        
-        retrieval_time = time.time() - start_time
-        logger.debug("Retrieved %s chunks in %.2fs", len(retrieved_docs), retrieval_time)
-
-        # -----------------------------------------------------------
-        #  LATE-CHUNK MERGING (merge 1 sub-vector into central hit)
-        # -----------------------------------------------------------
-        if self.retriever_configs.get("latechunk", {}).get("enabled") and retrieved_docs:
-            merged_count = 0
-            for doc in retrieved_docs:
-                try:
-                    cid = doc.get("chunk_id")
-                    meta = doc.get("metadata", {})
-                    if meta.get("latechunk_merged"):
-                        continue  # already processed
-                    doc_id = doc.get("document_id")
-                    cidx = doc.get("chunk_index")
-                    if doc_id is None or cidx is None or cidx == -1:
-                        continue
-                    # Fetch neighbouring late-chunks inside same document (1)
-                    siblings = self._get_surrounding_chunks_lancedb(doc, window_size=1)
-                    # Keep only same document_id and ordered by chunk_index
-                    siblings = [s for s in siblings if s.get("document_id") == doc_id]
-                    siblings.sort(key=lambda s: s.get("chunk_index", 0))
-                    merged_text = " \n".join(s.get("text", "") for s in siblings)
-                    if merged_text:
-                        doc["text"] = merged_text
-                        meta["latechunk_merged"] = True
-                        merged_count += 1
-                except Exception as e:
-                    print(f"  Late-chunk merge failed for chunk {doc.get('chunk_id')}: {e}")
-            if merged_count:
-                print(f" Late-chunk merging applied to {merged_count} retrieved chunks.")
-
-        # --- AI Reranking Step ---
-        ai_reranker = self._get_ai_reranker()
-        if ai_reranker and retrieved_docs:
+        self._chunk_window_cache = {}
+        cache_key = self._build_query_cache_key(query, table_name)
+        cached_result = self._get_cached_query_result(cache_key)
+        if cached_result is not None:
             if event_callback:
-                event_callback("rerank_started", {"count": len(retrieved_docs)})
-            print(f"\n--- Reranking top {len(retrieved_docs)} docs with AI model... ---")
-            start_rerank_time = time.time()
+                event_callback("cache_hit", {"level": "retrieval_pipeline"})
+            return cached_result
+        try:
+            start_time = time.time()
+            retrieval_k = self.config.get("retrieval_k", 10)
 
-            rerank_cfg = self.config.get("reranker", {})
-            top_k_cfg = rerank_cfg.get("top_k")
-            top_percent = rerank_cfg.get("top_percent")  # value in range 01
+            logger = logging.getLogger(__name__)
+            logger.debug("--- Running Hybrid Search for query '%s' (table=%s) ---", query, table_name or self.storage_config.get("text_table_name"))
+            
+            # If a custom table_name is provided, propagate it to storage config so helper methods use it
+            if table_name:
+                self.storage_config["text_table_name"] = table_name
 
-            if top_percent is not None:
-                try:
-                    pct = float(top_percent)
-                    assert 0 < pct <= 1
-                    top_k = max(1, int(len(retrieved_docs) * pct))
-                except Exception:
-                    print("  Invalid top_percent value; falling back to top_k")
-                    top_k = top_k_cfg or len(retrieved_docs)
-            else:
-                top_k = top_k_cfg or len(retrieved_docs)
-
-            strategy = self.config.get("reranker", {}).get("strategy", "qwen")
-
-            if strategy == "rerankers-lib":
-                texts = [d['text'] for d in retrieved_docs]
-                # ColBERT's Rust backend isn't Sync; serialise calls.
-                with _rerank_lock:
-                    ranked = ai_reranker.rank(query=query, docs=texts)
-                # ranked is RankedResults; convert to list of (score, idx)
-                try:
-                    pairs = [(r.score, r.document.doc_id) for r in ranked.results]
-                    if any(p[1] is None for p in pairs):
-                        pairs = [(r.score, i) for i, r in enumerate(ranked.results)]
-                except Exception:
-                    pairs = ranked
-                # Keep only top_k results if requested
-                if top_k is not None and len(pairs) > top_k:
-                    pairs = pairs[:top_k]
-                reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
-            else:
-                try:
-                    reranked_docs = ai_reranker.rerank(query, retrieved_docs, top_k=top_k)
-                except TypeError:
-                    texts = [d['text'] for d in retrieved_docs]
-                    pairs = ai_reranker.rank(query, texts, top_k=top_k)
-                    reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
-
-            rerank_time = time.time() - start_rerank_time
-            print(f" Reranking completed in {rerank_time:.2f}s. Refined to {len(reranked_docs)} docs.")
             if event_callback:
-                event_callback("rerank_done", {"count": len(reranked_docs)})
-        else:
-            # If no AI reranker, proceed with the initially retrieved docs
-            reranked_docs = retrieved_docs
+                event_callback("retrieval_started", {})
+            # Unified retrieval using the refactored MultiVectorRetriever
+            dense_retriever = self._get_dense_retriever()
+            # Get the LanceDB reranker for initial score fusion
+            lancedb_reranker = self._get_reranker()
+            search_type = self.retriever_configs.get("search_type", "hybrid")
+            dense_weight = float(self.retriever_configs.get("dense", {}).get("weight", self.config.get("fusion", {}).get("vec_weight", 0.5)))
+            dense_weight = min(max(dense_weight, 0.0), 1.0)
+            
+            retrieved_docs = []
+            if dense_retriever:
+                dense_retriever.fusion_config["search_type"] = search_type
+                dense_retriever.fusion_config["vec_weight"] = dense_weight
+                dense_retriever.fusion_config["bm25_weight"] = 1.0 - dense_weight
+                retrieved_docs = dense_retriever.retrieve(
+                    text_query=query,
+                    table_name=table_name or self.storage_config["text_table_name"],
+                    k=retrieval_k,
+                    reranker=lancedb_reranker,
+                    search_type=search_type,
+                )
 
-        window_size = self.config.get("context_window_size", 1)
-        if window_size_override is not None:
-            window_size = window_size_override
-        if window_size > 0 and reranked_docs:
-            if event_callback:
-                event_callback("context_expand_started", {"count": len(reranked_docs)})
-            print(f"\n--- Expanding context for {len(reranked_docs)} top documents (window size: {window_size})... ---")
-            expanded_chunks = {}
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future_to_chunk = {executor.submit(self._get_surrounding_chunks_lancedb, chunk, window_size): chunk for chunk in reranked_docs}
-                for future in concurrent.futures.as_completed(future_to_chunk):
+            # ---------------------------------------------------------------
+            # Late-Chunk retrieval (optional)
+            # ---------------------------------------------------------------
+            if self.latechunk_cfg.get("enabled"):
+                lc_table = self.latechunk_cfg.get("lancedb_table_name") or self.latechunk_cfg.get("table_name")
+                if lc_table and dense_retriever:
                     try:
-                        seed_chunk = future_to_chunk[future]
-                        surrounding_chunks = future.result()
-                        for surrounding_chunk in surrounding_chunks:
-                            cid = surrounding_chunk['chunk_id']
-                            if cid not in expanded_chunks:
-                                # If this is the *central* chunk we already reranked, carry over its score
-                                if cid == seed_chunk.get('chunk_id') and 'rerank_score' in seed_chunk:
-                                    surrounding_chunk['rerank_score'] = seed_chunk['rerank_score']
-                                expanded_chunks[cid] = surrounding_chunk
+                        lc_docs = dense_retriever.retrieve(
+                            text_query=query,
+                            table_name=lc_table,
+                            k=retrieval_k,
+                            reranker=lancedb_reranker,
+                            search_type=search_type,
+                        )
+                        retrieved_docs.extend(lc_docs)
                     except Exception as e:
-                        print(f"Error expanding context for a chunk: {e}")
+                        print(f"  Late-chunk retrieval failed: {e}")
 
-            final_docs = list(expanded_chunks.values())
-            # Sort by reranker score if present, otherwise by raw score/distance
-            if any('rerank_score' in d for d in final_docs):
-                final_docs.sort(key=lambda c: c.get('rerank_score', -1), reverse=True)
-            elif any('_distance' in d for d in final_docs):
-                # For vector search smaller distance is better
-                final_docs.sort(key=lambda c: c.get('_distance', 1e9))
-            elif any('score' in d for d in final_docs):
-                final_docs.sort(key=lambda c: c.get('score', 0), reverse=True)
+            if event_callback:
+                event_callback("retrieval_done", {"count": len(retrieved_docs)})
+            
+            retrieval_time = time.time() - start_time
+            logger.debug("Retrieved %s chunks in %.2fs", len(retrieved_docs), retrieval_time)
+
+            # -----------------------------------------------------------
+            #  LATE-CHUNK MERGING (merge 1 sub-vector into central hit)
+            # -----------------------------------------------------------
+            if self.latechunk_cfg.get("enabled") and retrieved_docs:
+                merged_count = 0
+                for doc in retrieved_docs:
+                    try:
+                        meta = doc.get("metadata", {})
+                        if meta.get("latechunk_merged"):
+                            continue  # already processed
+                        doc_id = doc.get("document_id")
+                        cidx = doc.get("chunk_index")
+                        if doc_id is None or cidx is None or cidx == -1:
+                            continue
+                        siblings = self._get_surrounding_chunks_lancedb(doc, window_size=1)
+                        siblings = [s for s in siblings if s.get("document_id") == doc_id]
+                        siblings.sort(key=lambda s: s.get("chunk_index", 0))
+                        merged_text = " \n".join(s.get("text", "") for s in siblings)
+                        if merged_text:
+                            doc["text"] = merged_text
+                            meta["latechunk_merged"] = True
+                            merged_count += 1
+                    except Exception as e:
+                        print(f"  Late-chunk merge failed for chunk {doc.get('chunk_id')}: {e}")
+                if merged_count:
+                    print(f" Late-chunk merging applied to {merged_count} retrieved chunks.")
+
+            # --- AI Reranking Step ---
+            ai_reranker = self._get_ai_reranker()
+            if ai_reranker and retrieved_docs:
+                if event_callback:
+                    event_callback("rerank_started", {"count": len(retrieved_docs)})
+                print(f"\n--- Reranking top {len(retrieved_docs)} docs with AI model... ---")
+                start_rerank_time = time.time()
+
+                rerank_cfg = self.config.get("reranker", {})
+                top_k_cfg = rerank_cfg.get("top_k")
+                top_percent = rerank_cfg.get("top_percent")  # value in range 01
+
+                if top_percent is not None:
+                    try:
+                        pct = float(top_percent)
+                        assert 0 < pct <= 1
+                        top_k = max(1, int(len(retrieved_docs) * pct))
+                    except Exception:
+                        print("  Invalid top_percent value; falling back to top_k")
+                        top_k = top_k_cfg or len(retrieved_docs)
+                else:
+                    top_k = top_k_cfg or len(retrieved_docs)
+
+                dynamic_top_k_cfg = rerank_cfg.get("dynamic_top_k", {}) if isinstance(rerank_cfg, dict) else {}
+                if dynamic_top_k_cfg.get("enabled"):
+                    short_query_threshold = int(dynamic_top_k_cfg.get("short_query_tokens", 6))
+                    short_query_cap = int(dynamic_top_k_cfg.get("short_query_top_k", 8))
+                    long_query_floor = int(dynamic_top_k_cfg.get("long_query_min_top_k", 12))
+                    query_tokens = len(str(query or "").split())
+                    if query_tokens <= short_query_threshold:
+                        top_k = min(top_k, short_query_cap)
+                    else:
+                        top_k = max(top_k, long_query_floor)
+                    top_k = max(1, min(top_k, len(retrieved_docs)))
+
+                strategy = self.config.get("reranker", {}).get("strategy", "qwen")
+
+                if strategy == "rerankers-lib":
+                    texts = [d['text'] for d in retrieved_docs]
+                    # ColBERT's Rust backend isn't Sync; serialise calls.
+                    with _rerank_lock:
+                        ranked = ai_reranker.rank(query=query, docs=texts)
+                    # ranked is RankedResults; convert to list of (score, idx)
+                    try:
+                        pairs = [(r.score, r.document.doc_id) for r in ranked.results]
+                        if any(p[1] is None for p in pairs):
+                            pairs = [(r.score, i) for i, r in enumerate(ranked.results)]
+                    except Exception:
+                        pairs = ranked
+                    # Keep only top_k results if requested
+                    if top_k is not None and len(pairs) > top_k:
+                        pairs = pairs[:top_k]
+                    reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+                else:
+                    try:
+                        reranked_docs = ai_reranker.rerank(query, retrieved_docs, top_k=top_k)
+                    except TypeError:
+                        texts = [d['text'] for d in retrieved_docs]
+                        pairs = ai_reranker.rank(query, texts, top_k=top_k)
+                        reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+
+                rerank_time = time.time() - start_rerank_time
+                print(f" Reranking completed in {rerank_time:.2f}s. Refined to {len(reranked_docs)} docs.")
+                if event_callback:
+                    event_callback("rerank_done", {"count": len(reranked_docs)})
             else:
-                # Fallback to document order
-                final_docs.sort(key=lambda c: (c.get('document_id', ''), c.get('chunk_index', 0)))
+                # If no AI reranker, proceed with the initially retrieved docs
+                reranked_docs = retrieved_docs
 
-            print(f"Expanded to {len(final_docs)} unique chunks for synthesis.")
-            if event_callback:
-                event_callback("context_expand_done", {"count": len(final_docs)})
-        else:
-            final_docs = reranked_docs
+            window_size = self.config.get("context_window_size", 1)
+            if window_size_override is not None:
+                window_size = window_size_override
+            if window_size > 0 and reranked_docs:
+                if event_callback:
+                    event_callback("context_expand_started", {"count": len(reranked_docs)})
+                print(f"\n--- Expanding context for {len(reranked_docs)} top documents (window size: {window_size})... ---")
+                final_docs = self._expand_context_chunks(reranked_docs, window_size)
+                print(f"Expanded to {len(final_docs)} unique chunks for synthesis.")
+                if event_callback:
+                    event_callback("context_expand_done", {"count": len(final_docs)})
+            else:
+                final_docs = reranked_docs
 
-        # Optionally hide non-reranked chunks: if any chunk carries a
-        # `rerank_score`, we assume the caller wants to focus on those.
-        if any('rerank_score' in d for d in final_docs):
-            final_docs = [d for d in final_docs if 'rerank_score' in d]
+            # Optionally hide non-reranked chunks: if any chunk carries a
+            # `rerank_score`, we assume the caller wants to focus on those.
+            if any('rerank_score' in d for d in final_docs):
+                final_docs = [d for d in final_docs if 'rerank_score' in d]
 
-        # ------------------------------------------------------------------
-        # Sentence-level pruning (Provence)
-        # ------------------------------------------------------------------
-        prov_cfg = self.config.get("provence", {})
-        if prov_cfg.get("enabled"):
-            if event_callback:
-                event_callback("prune_started", {"count": len(final_docs)})
-            thresh = float(prov_cfg.get("threshold", 0.1))
-            print(f"\n--- Provence pruning enabled (threshold={thresh}) ---")
-            pruner = self._get_sentence_pruner()
-            final_docs = pruner.prune_documents(query, final_docs, threshold=thresh)
-            # Remove any chunks that were fully pruned (empty text)
-            final_docs = [d for d in final_docs if d.get('text', '').strip()]
-            if event_callback:
-                event_callback("prune_done", {"count": len(final_docs)})
+            # ------------------------------------------------------------------
+            # Sentence-level pruning (Provence)
+            # ------------------------------------------------------------------
+            prov_cfg = self.config.get("provence", {})
+            if prov_cfg.get("enabled"):
+                if event_callback:
+                    event_callback("prune_started", {"count": len(final_docs)})
+                thresh = float(prov_cfg.get("threshold", 0.1))
+                print(f"\n--- Provence pruning enabled (threshold={thresh}) ---")
+                pruner = self._get_sentence_pruner()
+                final_docs = pruner.prune_documents(query, final_docs, threshold=thresh)
+                # Remove any chunks that were fully pruned (empty text)
+                final_docs = [d for d in final_docs if d.get('text', '').strip()]
+                if event_callback:
+                    event_callback("prune_done", {"count": len(final_docs)})
 
-        print("\n--- Final Documents for Synthesis ---")
-        if not final_docs:
-            print("No documents to synthesize.")
-        else:
-            for i, doc in enumerate(final_docs):
-                print(f"  [{i+1}] Chunk ID: {doc.get('chunk_id')}")
-                print(f"      Score: {doc.get('score', 'N/A')}")
-                if 'rerank_score' in doc:
-                    print(f"      Rerank Score: {doc.get('rerank_score'):.4f}")
-                print(f"      Text: \"{doc.get('text', '').strip()}\"")
-        print("------------------------------------")
+            print("\n--- Final Documents for Synthesis ---")
+            if not final_docs:
+                print("No documents to synthesize.")
+            else:
+                for i, doc in enumerate(final_docs):
+                    print(f"  [{i+1}] Chunk ID: {doc.get('chunk_id')}")
+                    print(f"      Score: {doc.get('score', 'N/A')}")
+                    if 'rerank_score' in doc:
+                        print(f"      Rerank Score: {doc.get('rerank_score'):.4f}")
+                    print(f"      Text: \"{doc.get('text', '').strip()}\"")
+            print("------------------------------------")
 
-        if not final_docs:
-            return {"answer": "I could not find an answer in the documents.", "source_documents": []}
-        
-        # --- Sanitize docs for JSON serialization (no NaN/Inf types) ---
-        def _clean_val(v):
-            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                return None
-            if isinstance(v, (np.floating,)):
-                try:
-                    f = float(v)
-                    if math.isnan(f) or math.isinf(f):
+            if not final_docs:
+                return {"answer": "I could not find an answer in the documents.", "source_documents": []}
+            
+            # --- Sanitize docs for JSON serialization (no NaN/Inf types) ---
+            def _clean_val(v):
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    return None
+                if isinstance(v, (np.floating,)):
+                    try:
+                        f = float(v)
+                        if math.isnan(f) or math.isinf(f):
+                            return None
+                        return f
+                    except Exception:
                         return None
-                    return f
+                return v
+
+            for doc in final_docs:
+                # Remove heavy or internal-only fields before serialising
+                doc.pop("vector", None)
+                doc.pop("_distance", None)
+                doc.pop("_fused_score", None)
+                # Clean numeric fields
+                for key in ['score', '_distance', 'rerank_score']:
+                    if key in doc:
+                        doc[key] = _clean_val(doc[key])
+
+            context = "\n\n".join([f"[S{i+1}] {doc['text']}" for i, doc in enumerate(final_docs)])
+
+            #  DEBUG: Show the exact context passed to the LLM after pruning
+            print("\n=== Context passed to LLM (post-pruning) ===")
+            if len(context) > 2000:
+                print(context[:2000] + "\n[truncated] (total {} chars)".format(len(context)))
+            else:
+                print(context)
+            print("=== End of context ===\n")
+
+            final_answer = self._synthesize_final_answer(query, context, event_callback=event_callback)
+            result = {"answer": final_answer, "source_documents": final_docs}
+            self._store_cached_query_result(cache_key, result)
+            return result
+        finally:
+            self._chunk_window_cache.clear()
+
+    def diagnose_retrieval(
+        self,
+        query: str,
+        table_name: str = None,
+        *,
+        retrieval_k: Optional[int] = None,
+        pre_rerank_k: int = 10,
+        post_rerank_k: int = 10,
+        search_type: Optional[str] = None,
+        dense_weight: Optional[float] = None,
+        apply_ai_rerank: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        def _clean_score(value):
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                return None
+            if isinstance(value, (np.floating,)):
+                try:
+                    cast = float(value)
+                    if math.isnan(cast) or math.isinf(cast):
+                        return None
+                    return cast
                 except Exception:
                     return None
-            return v
+            return value
 
-        for doc in final_docs:
-            # Remove heavy or internal-only fields before serialising
-            doc.pop("vector", None)
-            doc.pop("_distance", None)
-            # Clean numeric fields
-            for key in ['score', '_distance', 'rerank_score']:
-                if key in doc:
-                    doc[key] = _clean_val(doc[key])
+        def _diag_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+            metadata = doc.get("metadata")
+            if isinstance(metadata, str):
+                metadata = self._parse_metadata_payload(metadata)
+            elif not isinstance(metadata, dict):
+                metadata = {}
 
-        context = "\n\n".join([doc['text'] for doc in final_docs])
+            text = str(doc.get("text") or "")
+            if len(text) > 400:
+                text = text[:400] + "..."
 
-        #  DEBUG: Show the exact context passed to the LLM after pruning
-        print("\n=== Context passed to LLM (post-pruning) ===")
-        if len(context) > 2000:
-            print(context[:2000] + "\n[truncated] (total {} chars)".format(len(context)))
-        else:
-            print(context)
-        print("=== End of context ===\n")
+            return {
+                "chunk_id": doc.get("chunk_id"),
+                "document_id": doc.get("document_id") or metadata.get("document_id"),
+                "chunk_index": doc.get("chunk_index"),
+                "score": _clean_score(doc.get("score")),
+                "bm25": _clean_score(doc.get("bm25")),
+                "distance": _clean_score(doc.get("_distance")),
+                "rerank_score": _clean_score(doc.get("rerank_score")),
+                "title": metadata.get("title") or metadata.get("document_title"),
+                "text": text,
+            }
 
-        final_answer = self._synthesize_final_answer(query, context, event_callback=event_callback)
-        
-        return {"answer": final_answer, "source_documents": final_docs}
+        active_table = table_name or self.storage_config.get("text_table_name")
+        if not active_table:
+            raise ValueError("No table_name available for diagnostics.")
+
+        retrieval_k = max(1, int(retrieval_k or self.config.get("retrieval_k", 10)))
+        pre_rerank_k = max(1, int(pre_rerank_k))
+        post_rerank_k = max(1, int(post_rerank_k))
+
+        dense_retriever = self._get_dense_retriever()
+        if dense_retriever is None:
+            return {
+                "query": query,
+                "table_name": active_table,
+                "retrieval": {
+                    "search_type": search_type or self.retriever_configs.get("search_type", "hybrid"),
+                    "dense_weight": dense_weight,
+                    "retrieval_k": retrieval_k,
+                    "pre_rerank": [],
+                    "post_rerank": [],
+                    "ai_rerank_applied": False,
+                    "retrieved_count": 0,
+                },
+            }
+
+        selected_search_type = (search_type or self.retriever_configs.get("search_type") or "hybrid").lower()
+        selected_dense_weight = dense_weight
+        if selected_dense_weight is None:
+            selected_dense_weight = float(
+                self.retriever_configs.get("dense", {}).get(
+                    "weight", self.config.get("fusion", {}).get("vec_weight", 0.5)
+                )
+            )
+        selected_dense_weight = min(max(float(selected_dense_weight), 0.0), 1.0)
+
+        dense_retriever.fusion_config["search_type"] = selected_search_type
+        dense_retriever.fusion_config["vec_weight"] = selected_dense_weight
+        dense_retriever.fusion_config["bm25_weight"] = 1.0 - selected_dense_weight
+
+        retrieved_docs = dense_retriever.retrieve(
+            text_query=query,
+            table_name=active_table,
+            k=retrieval_k,
+            reranker=self._get_reranker(),
+            search_type=selected_search_type,
+        )
+
+        pre_docs = [_diag_doc(doc) for doc in retrieved_docs[:pre_rerank_k]]
+
+        ai_rerank_enabled = self.config.get("reranker", {}).get("enabled", False)
+        if apply_ai_rerank is not None:
+            ai_rerank_enabled = bool(apply_ai_rerank)
+
+        reranked_docs = list(retrieved_docs)
+        ai_rerank_applied = False
+        if ai_rerank_enabled and retrieved_docs:
+            ai_reranker = self._get_ai_reranker()
+            if ai_reranker:
+                ai_rerank_applied = True
+                top_k = min(max(post_rerank_k, 1), len(retrieved_docs))
+                strategy = self.config.get("reranker", {}).get("strategy", "qwen")
+                if strategy == "rerankers-lib":
+                    texts = [doc["text"] for doc in retrieved_docs]
+                    with _rerank_lock:
+                        ranked = ai_reranker.rank(query=query, docs=texts)
+                    try:
+                        pairs = [(r.score, r.document.doc_id) for r in ranked.results]
+                        if any(pair[1] is None for pair in pairs):
+                            pairs = [(r.score, i) for i, r in enumerate(ranked.results)]
+                    except Exception:
+                        pairs = ranked
+                    pairs = pairs[:top_k]
+                    reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+                else:
+                    if hasattr(ai_reranker, "rerank"):
+                        reranked_docs = ai_reranker.rerank(query, retrieved_docs, top_k=top_k)
+                    else:
+                        texts = [doc["text"] for doc in retrieved_docs]
+                        pairs = ai_reranker.rank(query, texts, top_k=top_k)
+                        reranked_docs = [retrieved_docs[idx] | {"rerank_score": score} for score, idx in pairs]
+
+        post_docs = [_diag_doc(doc) for doc in reranked_docs[:post_rerank_k]]
+
+        return {
+            "query": query,
+            "table_name": active_table,
+            "retrieval": {
+                "search_type": selected_search_type,
+                "dense_weight": selected_dense_weight,
+                "retrieval_k": retrieval_k,
+                "pre_rerank": pre_docs,
+                "post_rerank": post_docs,
+                "ai_rerank_applied": ai_rerank_applied,
+                "retrieved_count": len(retrieved_docs),
+                "post_rerank_count": len(reranked_docs),
+            },
+        }
 
     # ------------------------------------------------------------------
     # Public utility

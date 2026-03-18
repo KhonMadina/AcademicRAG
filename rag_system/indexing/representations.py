@@ -3,6 +3,8 @@ import numpy as np
 from transformers import AutoModel, AutoTokenizer
 import torch
 import os
+import time
+import threading
 
 # We keep the protocol to ensure a consistent interface
 class EmbeddingModel(Protocol):
@@ -16,7 +18,7 @@ class QwenEmbedder(EmbeddingModel):
     """
     An embedding model that uses a local Hugging Face transformer model.
     """
-    def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B"):
+    def __init__(self, model_name: str = "nomic-embed-text:v1.5"):
         self.model_name = model_name
         # Auto-select the best available device: CUDA > MPS > CPU
         if torch.cuda.is_available():
@@ -108,13 +110,68 @@ class OllamaEmbedder(EmbeddingModel):
     def __init__(self, model_name: str, host: str | None = None, timeout: int = 60):
         self.model_name = model_name
         self.host = (host or os.getenv("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
-        self.timeout = timeout
+        self.timeout = int(os.getenv("OLLAMA_REQUEST_TIMEOUT_SEC", str(timeout)))
+        self.max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+        self.retry_backoff_sec = float(os.getenv("OLLAMA_RETRY_BACKOFF_SEC", "1.5"))
+        self.circuit_breaker_threshold = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_THRESHOLD", "5"))
+        self.circuit_breaker_reset_sec = int(os.getenv("OLLAMA_CIRCUIT_BREAKER_RESET_SEC", "30"))
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
+        self._state_lock = threading.Lock()
+
+    def _is_circuit_open(self) -> bool:
+        with self._state_lock:
+            return time.time() < self._circuit_open_until
+
+    def _record_success(self):
+        with self._state_lock:
+            self._failure_count = 0
+            self._circuit_open_until = 0.0
+
+    def _record_failure(self):
+        with self._state_lock:
+            self._failure_count += 1
+            if self._failure_count >= self.circuit_breaker_threshold:
+                self._circuit_open_until = time.time() + self.circuit_breaker_reset_sec
+
+    def _embed_single_with_resilience(self, text: str):
+        import requests
+
+        if self._is_circuit_open():
+            raise RuntimeError("Ollama embedding circuit breaker is open. Please retry shortly.")
+
+        payload = {"model": self.model_name, "prompt": text}
+        max_attempts = self.max_retries + 1
+        last_error = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = requests.post(f"{self.host}/api/embeddings", json=payload, timeout=self.timeout)
+                if 500 <= r.status_code < 600:
+                    raise requests.exceptions.HTTPError(
+                        f"Transient Ollama server error: {r.status_code}",
+                        response=r,
+                    )
+                r.raise_for_status()
+                self._record_success()
+                return r
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
+                last_error = e
+                self._record_failure()
+                if attempt < max_attempts and not self._is_circuit_open():
+                    time.sleep(self.retry_backoff_sec * attempt)
+                    continue
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                self._record_failure()
+                break
+
+        raise RuntimeError(f"Ollama embedding request failed after {max_attempts} attempts: {last_error}")
 
     def _embed_single(self, text: str):
-        import requests, numpy as np, json
-        payload = {"model": self.model_name, "prompt": text}
-        r = requests.post(f"{self.host}/api/embeddings", json=payload, timeout=self.timeout)
-        r.raise_for_status()
+        import numpy as np, json
+        r = self._embed_single_with_resilience(text)
         data = r.json()
         # Ollama may return {"embedding": [...]} or {"data": [...]} depending on version
         vec = data.get("embedding") or data.get("data")

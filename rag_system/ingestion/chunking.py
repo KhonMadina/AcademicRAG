@@ -8,16 +8,14 @@ class MarkdownRecursiveChunker:
     and embeds document-level metadata into each chunk.
     """
 
-    def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 200, tokenizer_model: str = "Qwen/Qwen3-Embedding-0.6B"):
+    def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 200, tokenizer_model: str = "nomic-embed-text:v1.5"):
         self.max_chunk_size = max_chunk_size
         self.min_chunk_size = min_chunk_size
         self.split_priority = ["\n## ", "\n### ", "\n#### ", "```", "\n\n"]
         
         repo_id = tokenizer_model
-        if "/" not in tokenizer_model and not tokenizer_model.startswith("Qwen/"):
-            repo_id = {
-                "qwen3-embedding-0.6b": "Qwen/Qwen3-Embedding-0.6B",
-            }.get(tokenizer_model.lower(), tokenizer_model)
+        if "/" not in tokenizer_model:
+            repo_id = tokenizer_model
         
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)

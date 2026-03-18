@@ -1,22 +1,5 @@
 # AcademicRAG - Private Document Intelligence Platform
 
-<div align="center">
-
-<p align="center">
-</p>
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
-
-<p align="center">
-    <a href="https://x.com/engineerrprompt">
-      <img src="https://img.shields.io/badge/Follow%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow on X" />
-    </a>
-    <a href="https://discord.gg/tUDWAFGc">
-      <img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" />
-    </a>
-  </p>
-</div>
-
 ##  What is AcademicRAG?
 
 AcademicRAG is a sovereign, on-premise Document Intelligence platform designed for secure knowledge extraction. By ensuring all processing occurs locally, the system facilitates sophisticated data synthesis and summarization without compromising data privacy or permitting external egress.
@@ -107,8 +90,9 @@ npm install
 
 # Install and start Ollama
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
+ollama pull nomic-embed-text:v1.5
 ollama serve
 
 # Start the system (in a new terminal)
@@ -196,8 +180,8 @@ brew install python@3.8 node npm
 curl -fsSL https://ollama.ai/install.sh | sh
 
 # Pull recommended models
-ollama pull gemma3:4b-cloud          # Fast generation model
-ollama pull gemma3:12b-cloud            # High-quality generation model
+ollama pull gemma3:12b-cloud      # Default generation model
+ollama pull nomic-embed-text:v1.5         # Default embedding model
 ```
 
 #### 3. Configure Environment
@@ -226,10 +210,23 @@ RAG_API_PORT=8001
 
 # Optional: Override default models
 GENERATION_MODEL=gemma3:12b-cloud
-ENRICHMENT_MODEL=gemma3:4b-cloud
-EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+ENRICHMENT_MODEL=gemma3:12b-cloud
+EMBEDDING_MODEL=nomic-embed-text:v1.5
 RERANKER_MODEL=answerdotai/answerai-colbert-small-v1
+
+# Optional: PDF memory guard for indexing stability
+# Bypass Docling pre-process for very large PDFs and use lightweight fallback extraction
+RAG_LARGE_PDF_SIZE_MB=40
+RAG_LARGE_PDF_PAGE_THRESHOLD=150
 ```
+
+### PDF Indexing Stability (Docling OOM Guard)
+
+AcademicRAG now protects indexing from Docling preprocess memory failures (e.g. `std::bad_alloc`) by:
+- bypassing Docling for large PDFs (size/page threshold),
+- auto-falling back to PyMuPDF text extraction if Docling conversion fails.
+
+Tune with `RAG_LARGE_PDF_SIZE_MB` and `RAG_LARGE_PDF_PAGE_THRESHOLD` in `.env`.
 
 #### 4. Initialize the System
 
@@ -305,7 +302,7 @@ curl -X POST http://localhost:8000/sessions \
   -d '{
     "title": "High Quality Session",
     "model": "gemma3:12b-cloud",
-    "embedding_model": "Qwen/Qwen3-Embedding-4B"
+    "embedding_model": "nomic-embed-text:v1.5:latest"
   }'
 ```
 
@@ -342,8 +339,8 @@ AcademicRAG supports multiple AI model providers with centralized configuration:
 ```python
 OLLAMA_CONFIG = {
     "host": "http://localhost:11434",
-    "generation_model": "gemma3:12b-cloud",        # Main text generation
-    "enrichment_model": "gemma3:4b-cloud"       # Lightweight routing/enrichment
+    "generation_model": "gemini-3-flash-preview:cloud",        # Main text generation
+    "enrichment_model": "gemma3:12b-cloud"       # Lightweight routing/enrichment
 }
 ```
 
@@ -366,8 +363,7 @@ AcademicRAG offers two main pipeline configurations:
     "description": "Production-ready pipeline with hybrid search, AI reranking, and verification",
     "storage": {
         "lancedb_uri": "./lancedb",
-        "text_table_name": "text_pages_v3",
-        "bm25_path": "./index_store/bm25"
+      "text_table_name": "text_pages_v3"
     },
     "retrieval": {
         "retriever": "multivector",
@@ -443,7 +439,7 @@ ollama list
 curl http://localhost:11434/api/tags
 
 # Pull missing models
-ollama pull gemma3:4b-cloud
+ollama pull gemma3:12b-cloud
 ```
 
 #### Database Issues
@@ -566,7 +562,7 @@ POST /sessions
 Content-Type: application/json
 {
   "title": "My Session",
-  "model": "gemma3:4b-cloud"
+  "model": "gemma3:12b-cloud"
 }
 
 # Get all sessions
@@ -672,7 +668,7 @@ python demo_batch_indexing.py --config batch_indexing_config.json
     "enable_latechunk": true,
     "enable_docling": true,
     "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
-    "generation_model": "gemma3:4b-cloud",
+    "generation_model": "gemma3:12b-cloud",
     "retrieval_mode": "hybrid",
     "window_size": 2
   }
@@ -694,8 +690,6 @@ Content-Type: application/json
   }
 }
 ```
-
-For complete API documentation, see [API_REFERENCE.md](API_REFERENCE.md).
 
 ---
 
@@ -784,18 +778,5 @@ npm install
 
 # Install Ollama and models
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma3:4b-cloud gemma3:12b-cloud
-
-# Verify setup
-python system_health_check.py
-python run_system.py --mode dev
-```
-
----
-
-##  License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. For models, please check their respective licenses.
-
-<div align="center">
+ollama pull gemma3:12b-cloud gemma3:27b-cloud
 

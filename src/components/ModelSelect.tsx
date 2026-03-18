@@ -20,11 +20,12 @@ export function ModelSelect({ value, onChange, type, className, placeholder }: P
       .getModels()
       .then((res: ModelsResponse) => {
         if (!mounted) return;
-        const list = type === 'generation' ? res.generation_models : res.embedding_models;
+        const rawList = type === 'generation' ? res.generation_models : res.embedding_models;
+        const list = Array.from(new Set(rawList.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)));
         setModels(list);
-        // Auto-select default gemma3:4b-cloud if available and not chosen yet
-        if(!value && list.includes('gemma3:4b-cloud')){
-          onChange('gemma3:4b-cloud');
+        // Auto-select default gemma3:12b-cloud if available and not chosen yet
+        if(!value && list.includes('gemma3:12b-cloud')){
+          onChange('gemma3:12b-cloud');
         }
         setLoading(false);
       })
@@ -55,7 +56,7 @@ export function ModelSelect({ value, onChange, type, className, placeholder }: P
 
   return (
     <select
-      className={`w-full px-3 py-2 bg-white/50 border border-white-600 text-black/70 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-500 focus:border-transparent hover:cursor-pointer ${className || ''}`}
+      className={`w-full px-2 py-2 bg-white/50 border border-white-600 text-black/70 rounded-sm text-xs focus:outline-none focus:ring-2 focus:ring-gray-200 focus:border-transparent hover:cursor-pointer ${className || ''}`}
       value={value || ''}
       onChange={(e) => onChange(e.target.value)}
     >

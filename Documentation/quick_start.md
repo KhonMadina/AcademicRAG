@@ -29,13 +29,16 @@ Best for: Development, customization, debugging, faster iteration
 ```bash
 # Clone repository
 git clone <your-repository-url>
-cd rag_system_old
+cd AcademicRAG
 
 # Install Python dependencies
 pip install -r requirements.txt
 
 # Install Node.js dependencies  
 npm install
+
+# Create local environment config
+cp .env.example .env
 ```
 
 ### Step 2: Install and Configure Ollama
@@ -48,20 +51,23 @@ curl -fsSL https://ollama.ai/install.sh | sh
 ollama serve
 
 # Install models (in another terminal)
-ollama pull gemma3:4b-cloud
 ollama pull gemma3:12b-cloud
+ollama pull gemma3:27b-cloud
 ```
 
-### Step 3: Start the System
+### Step 3: Start the System (Primary Path)
 
 ```bash
 # Start all components with one command
 python run_system.py
 ```
 
-**Or start components manually in separate terminals:**
+**Manual startup (advanced troubleshooting):**
 
 ```bash
+# Terminal 1: Ollama
+ollama serve
+
 # Terminal 1: RAG API
 python -m rag_system.api_server
 
@@ -81,7 +87,9 @@ python system_health_check.py
 # Test endpoints
 curl http://localhost:3000      # Frontend
 curl http://localhost:8000/health  # Backend
-curl http://localhost:8001/models  # RAG API
+curl http://localhost:8001/health  # RAG API
+curl http://localhost:8000/metrics # Backend metrics
+curl http://localhost:8001/metrics # RAG metrics
 ```
 
 ### Step 5: Access Application
@@ -124,6 +132,9 @@ Open your browser to: **http://localhost:3000**
 ```bash
 # System management
 python run_system.py               # Start all services
+python run_system.py --health      # Liveness/readiness summary
+python run_system.py --no-frontend # Start backend + RAG only
+python run_system.py --stop        # Stop managed services
 python system_health_check.py      # Check system health
 
 # Individual components
@@ -191,8 +202,10 @@ Run this comprehensive check:
 # Check all endpoints
 curl -f http://localhost:3000 && echo " Frontend OK"
 curl -f http://localhost:8000/health && echo " Backend OK"  
-curl -f http://localhost:8001/models && echo " RAG API OK"
+curl -f http://localhost:8001/health && echo " RAG API OK"
 curl -f http://localhost:11434/api/tags && echo " Ollama OK"
+curl -f http://localhost:8000/metrics && echo " Backend Metrics OK"
+curl -f http://localhost:8001/metrics && echo " RAG Metrics OK"
 
 ```
 
@@ -218,7 +231,6 @@ You're ready to start using AcademicRAG!
 
 ```
 rag-system/
-  run_system.py             # Direct development launcher
   run_system.py             # Direct development launcher
   system_health_check.py    # System verification
   requirements.txt          # Python dependencies

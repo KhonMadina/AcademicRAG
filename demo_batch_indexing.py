@@ -60,8 +60,8 @@ class BatchIndexingDemo:
             self.pipeline_config,
             self.ollama_client,
             self.config.get("ollama_config", {
-                "generation_model": "gemma3:4b-cloud",
-                "embedding_model": "gemma3:4b-cloud"
+                "generation_model": "gemma3:12b-cloud",
+                "embedding_model": "nomic-embed-text:v1.5"
             })
         )
     
@@ -256,7 +256,7 @@ def create_sample_config():
     sample_config = {
         "description": "Demo batch indexing configuration showcasing various features",
         "pipeline_settings": {
-            "embedding_model_name": "Qwen/Qwen3-Embedding-0.6B",
+            "embedding_model_name": "nomic-embed-text:v1.5",
             "indexing": {
                 "embedding_batch_size": 50,
                 "enrichment_batch_size": 25,
@@ -265,7 +265,7 @@ def create_sample_config():
             "contextual_enricher": {
                 "enabled": True,
                 "window_size": 2,
-                "model_name": "gemma3:4b-cloud"
+                "model_name": "gemma3:12b-cloud"
             },
             "chunking": {
                 "chunk_size": 512,
@@ -284,13 +284,12 @@ def create_sample_config():
                 }
             },
             "storage": {
-                "lancedb_uri": "./index_store/lancedb",
-                "bm25_path": "./index_store/bm25"
+                "lancedb_uri": "./index_store/lancedb"
             }
         },
         "ollama_config": {
-            "generation_model": "gemma3:4b-cloud",
-            "embedding_model": "gemma3:4b-cloud"
+            "generation_model": "gemma3:12b-cloud",
+            "embedding_model": "nomic-embed-text:v1.5"
         },
         "indexes": [
             {

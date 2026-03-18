@@ -6,6 +6,11 @@ import os
 import requests
 import sys
 import logging
+import time
+import uuid
+from logging.handlers import RotatingFileHandler
+from collections import defaultdict
+import threading
 
 # Add backend directory to path for database imports
 backend_dir = os.path.join(os.path.dirname(__file__), '..', 'backend')
@@ -16,6 +21,134 @@ from backend.database import ChatDatabase, generate_session_title
 from rag_system.main import get_agent
 from rag_system.factory import get_indexing_pipeline
 
+
+def _setup_service_logger(service_name: str, log_filename: str) -> logging.Logger:
+    logger = logging.getLogger(service_name)
+    if logger.handlers:
+        return logger
+
+    os.makedirs("logs", exist_ok=True)
+    max_bytes = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
+    file_handler = RotatingFileHandler(
+        os.path.join("logs", log_filename),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    if os.getenv("LOG_TO_STDOUT", "0") == "1":
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
+
+
+LOGGER = _setup_service_logger("academicrag.rag_api", "rag_api_server.log")
+
+
+def _resolve_request_id(headers) -> str:
+    if not headers:
+        return uuid.uuid4().hex
+    incoming = headers.get("X-Request-ID") or headers.get("X-Correlation-ID")
+    if isinstance(incoming, str):
+        normalized = incoming.strip()
+        if normalized:
+            return normalized[:128]
+    return uuid.uuid4().hex
+
+
+class ServiceMetrics:
+    def __init__(self):
+        self._started_at = time.time()
+        self._lock = threading.Lock()
+        self._requests_total = 0
+        self._requests_by_status: dict[str, int] = defaultdict(int)
+        self._requests_by_endpoint: dict[str, dict[str, float]] = defaultdict(
+            lambda: {
+                "count": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+                "4xx": 0,
+                "5xx": 0,
+            }
+        )
+        self._indexing = {
+            "count": 0,
+            "success": 0,
+            "failed": 0,
+            "total_duration_ms": 0.0,
+            "max_duration_ms": 0.0,
+            "last_duration_ms": None,
+        }
+
+    def record_request(self, method: str, path: str, status_code: int, duration_ms: float):
+        endpoint_key = f"{method.upper()} {path}"
+        status_bucket = f"{int(status_code) // 100}xx"
+        with self._lock:
+            self._requests_total += 1
+            self._requests_by_status[status_bucket] += 1
+            bucket = self._requests_by_endpoint[endpoint_key]
+            bucket["count"] += 1
+            bucket["total_ms"] += float(duration_ms)
+            bucket["max_ms"] = max(bucket["max_ms"], float(duration_ms))
+            if 400 <= int(status_code) < 500:
+                bucket["4xx"] += 1
+            if int(status_code) >= 500:
+                bucket["5xx"] += 1
+
+    def record_indexing(self, duration_ms: float, success: bool):
+        with self._lock:
+            self._indexing["count"] += 1
+            if success:
+                self._indexing["success"] += 1
+            else:
+                self._indexing["failed"] += 1
+            self._indexing["total_duration_ms"] += float(duration_ms)
+            self._indexing["max_duration_ms"] = max(self._indexing["max_duration_ms"], float(duration_ms))
+            self._indexing["last_duration_ms"] = float(duration_ms)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            endpoints = {}
+            for key, stats in self._requests_by_endpoint.items():
+                count = int(stats["count"])
+                avg_ms = (stats["total_ms"] / count) if count else 0.0
+                endpoints[key] = {
+                    "count": count,
+                    "avg_ms": round(avg_ms, 2),
+                    "max_ms": round(float(stats["max_ms"]), 2),
+                    "4xx": int(stats["4xx"]),
+                    "5xx": int(stats["5xx"]),
+                }
+
+            indexing_count = int(self._indexing["count"])
+            avg_index_ms = (self._indexing["total_duration_ms"] / indexing_count) if indexing_count else 0.0
+
+            return {
+                "uptime_s": round(time.time() - self._started_at, 2),
+                "requests": {
+                    "total": self._requests_total,
+                    "by_status": dict(self._requests_by_status),
+                    "by_endpoint": endpoints,
+                },
+                "indexing": {
+                    "count": indexing_count,
+                    "success": int(self._indexing["success"]),
+                    "failed": int(self._indexing["failed"]),
+                    "avg_duration_ms": round(avg_index_ms, 2),
+                    "max_duration_ms": round(float(self._indexing["max_duration_ms"]), 2),
+                    "last_duration_ms": self._indexing["last_duration_ms"],
+                },
+            }
+
 # Initialize database connection once at module level
 # Use auto-detection for environment-appropriate path
 db = ChatDatabase()
@@ -25,6 +158,7 @@ db = ChatDatabase()
 AGENT_MODE = os.getenv("RAG_CONFIG_MODE", "default")
 RAG_AGENT = get_agent(AGENT_MODE)
 INDEXING_PIPELINE = get_indexing_pipeline(AGENT_MODE)
+RAG_METRICS = ServiceMetrics()
 
 # --- Global Singleton for the RAG Agent ---
 # The agent is initialized once when the server starts.
@@ -115,7 +249,17 @@ def _get_table_name_for_session(session_id):
 class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         """Handle CORS preflight requests for frontend integration."""
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "OPTIONS",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         self.send_response(200)
+        self.send_header('X-Request-ID', str(self.request_id))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
@@ -123,6 +267,15 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests for chat and indexing."""
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "POST",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         parsed_path = urlparse(self.path)
 
         if parsed_path.path == '/chat':
@@ -131,16 +284,61 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
             self.handle_chat_stream()
         elif parsed_path.path == '/index':
             self.handle_index()
+        elif parsed_path.path == '/retrieval/diagnostics':
+            self.handle_retrieval_diagnostics()
         else:
             self.send_json_response({"error": "Not Found"}, status_code=404)
 
     def do_GET(self):
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "GET",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         parsed_path = urlparse(self.path)
 
-        if parsed_path.path == '/models':
+        if parsed_path.path == '/health':
+            self.send_json_response({
+                "status": "ok",
+                "service": "rag-api",
+                "check": "liveness"
+            })
+        elif parsed_path.path == '/metrics':
+            metrics = RAG_METRICS.snapshot()
+            if hasattr(RAG_AGENT, "get_cache_metrics"):
+                metrics.update(RAG_AGENT.get_cache_metrics())
+            self.send_json_response(metrics)
+        elif parsed_path.path == '/health/ready':
+            self.handle_readiness()
+        elif parsed_path.path == '/models':
             self.handle_models()
         else:
             self.send_json_response({"error": "Not Found"}, status_code=404)
+
+    def handle_readiness(self):
+        try:
+            resp = requests.get(f"{RAG_AGENT.ollama_config['host']}/api/tags", timeout=5)
+            ollama_ok = resp.status_code == 200
+            agent_ok = RAG_AGENT is not None and INDEXING_PIPELINE is not None
+            ready = ollama_ok and agent_ok
+
+            self.send_json_response({
+                "status": "ready" if ready else "not_ready",
+                "service": "rag-api",
+                "check": "readiness",
+                "ollama_running": ollama_ok,
+                "agent_initialized": agent_ok,
+                "mode": AGENT_MODE,
+            }, status_code=200 if ready else 503)
+        except Exception as e:
+            self.send_json_response({
+                "error": f"Readiness check failed: {e}",
+                "error_code": "readiness_failed"
+            }, status_code=503)
 
     def handle_chat(self):
         """Handles a chat query by calling the agentic RAG pipeline."""
@@ -303,6 +501,10 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
 
     def handle_chat_stream(self):
         """Stream internal phases and final answer using SSE (text/event-stream)."""
+        stream_started_at = time.time()
+        path = urlparse(self.path).path
+        stream_status = 500
+        used_json_response = False
         try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -383,6 +585,7 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Connection', 'keep-alive')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
+            stream_status = 200
 
             def emit(event_type: str, payload):
                 """Send a single SSE event."""
@@ -492,14 +695,31 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                     emit("error", error_payload)
                 finally:
                     print(f" Stream error: {e}")
+                    stream_status = 500
 
         except json.JSONDecodeError:
             self.send_json_response({"error": "Invalid JSON"}, status_code=400)
+            stream_status = 400
+            used_json_response = True
         except Exception as e:
             self.send_json_response({"error": f"Server error: {str(e)}"}, status_code=500)
+            stream_status = 500
+            used_json_response = True
+        finally:
+            if not used_json_response:
+                duration_ms = int((time.time() - stream_started_at) * 1000)
+                RAG_METRICS.record_request(
+                    method="POST",
+                    path=path,
+                    status_code=stream_status,
+                    duration_ms=duration_ms,
+                )
 
     def handle_index(self):
         """Triggers the document indexing pipeline for specific files."""
+        session_id = None
+        index_started_at = time.time()
+        index_success = False
         try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -531,6 +751,37 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                     "error": "A 'file_paths' list is required."
                 }, status_code=400)
                 return
+
+            def update_index_progress(stage: str, progress: float, details=None):
+                if not session_id:
+                    return
+                try:
+                    stage_to_status = {
+                        "parsing": "building",
+                        "enriching": "building",
+                        "embedding": "building",
+                        "storing": "building",
+                        "done": "functional",
+                        "failed": "failed",
+                    }
+                    status = stage_to_status.get(stage, "building")
+                    payload = {
+                        "status": status,
+                        "indexing_stage": stage,
+                        "indexing_progress": max(0.0, min(100.0, float(progress))),
+                        "indexing_updated_at": __import__("datetime").datetime.now().isoformat(),
+                    }
+                    if details:
+                        payload["indexing_details"] = details
+                    if stage == "done":
+                        payload["build_completed_at"] = __import__("datetime").datetime.now().isoformat()
+                    if stage == "failed":
+                        payload["build_error"] = str((details or {}).get("error", "Indexing failed"))
+                    db.update_index_metadata(session_id, payload)
+                except Exception as e:
+                    print(f" Could not persist indexing progress for {session_id}: {e}")
+
+            update_index_progress("parsing", 10.0, {"files_total": len(file_paths)})
 
             # Allow explicit table_name override
             table_name = data.get('table_name')
@@ -600,7 +851,7 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                     INDEXING_PIPELINE.llm_client, 
                     INDEXING_PIPELINE.ollama_config
                 )
-                temp_pipeline.run(file_paths)
+                temp_pipeline.run(file_paths, progress_callback=update_index_progress)
             else:
                 # Use the default pipeline with overrides
                 import copy
@@ -658,7 +909,7 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                     INDEXING_PIPELINE.llm_client, 
                     INDEXING_PIPELINE.ollama_config
                 )
-                temp_pipeline.run(file_paths)
+                temp_pipeline.run(file_paths, progress_callback=update_index_progress)
 
             self.send_json_response({
                 "message": f"Indexing process for {len(file_paths)} file(s) completed successfully.",
@@ -678,6 +929,9 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                 }
             })
 
+            update_index_progress("done", 100.0, {"files_total": len(file_paths)})
+            index_success = True
+
             if embedding_model:
                 try:
                     db.update_index_metadata(session_id, {"embedding_model": embedding_model})
@@ -685,9 +939,34 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                     print(f" Could not update embedding_model metadata: {e}")
 
         except json.JSONDecodeError:
+            if session_id:
+                try:
+                    db.update_index_metadata(session_id, {
+                        "status": "failed",
+                        "indexing_stage": "failed",
+                        "indexing_progress": 100.0,
+                        "build_error": "Invalid JSON",
+                    })
+                except Exception:
+                    pass
             self.send_json_response({"error": "Invalid JSON"}, status_code=400)
         except Exception as e:
+            if session_id:
+                try:
+                    db.update_index_metadata(session_id, {
+                        "status": "failed",
+                        "indexing_stage": "failed",
+                        "indexing_progress": 100.0,
+                        "build_error": str(e),
+                    })
+                except Exception:
+                    pass
             self.send_json_response({"error": f"Failed to start indexing: {str(e)}"}, status_code=500)
+        finally:
+            RAG_METRICS.record_indexing(
+                duration_ms=(time.time() - index_started_at) * 1000.0,
+                success=index_success,
+            )
 
     def handle_models(self):
         """Return a list of locally installed Ollama models and supported HuggingFace models, grouped by capability."""
@@ -701,7 +980,10 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
                 resp.raise_for_status()
                 data = resp.json()
 
-                all_ollama_models = [m.get('name') for m in data.get('models', [])]
+                all_ollama_models = [
+                    m.get('name') for m in data.get('models', [])
+                    if isinstance(m.get('name'), str) and m.get('name').strip()
+                ]
 
                 # Very naive classification
                 ollama_embedding_models = [m for m in all_ollama_models if any(k in m for k in ['embed','bge','embedding','text'])]
@@ -714,15 +996,15 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
             
             # Add supported HuggingFace embedding models
             huggingface_embedding_models = [
-                "Qwen/Qwen3-Embedding-0.6B",
+                "nomic-embed-text:v1.5",
                 "Qwen/Qwen3-Embedding-4B", 
                 "Qwen/Qwen3-Embedding-8B"
             ]
             embedding_models.extend(huggingface_embedding_models)
             
-            # Sort models for consistent ordering
-            generation_models.sort()
-            embedding_models.sort()
+            # De-duplicate and sort models for consistent ordering
+            generation_models = sorted(set(generation_models))
+            embedding_models = sorted(set(embedding_models))
 
             self.send_json_response({
                 "generation_models": generation_models,
@@ -731,14 +1013,119 @@ class AdvancedRagApiHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self.send_json_response({"error": f"Could not list models: {e}"}, status_code=500)
 
+    def handle_retrieval_diagnostics(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            data = json.loads(post_data.decode('utf-8'))
+
+            query = data.get('query')
+            session_id = data.get('session_id')
+            table_name = data.get('table_name')
+            retrieval_k = data.get('retrieval_k')
+            pre_rerank_k = data.get('pre_rerank_k', 10)
+            post_rerank_k = data.get('post_rerank_k', 10)
+            search_type = data.get('search_type')
+            dense_weight = data.get('dense_weight')
+            apply_ai_rerank = data.get('ai_rerank')
+
+            if not query:
+                self.send_json_response({"error": "Query is required", "error_code": "missing_query"}, status_code=400)
+                return
+
+            if not table_name and session_id:
+                table_name = _get_table_name_for_session(session_id)
+
+            result = RAG_AGENT.retrieval_pipeline.diagnose_retrieval(
+                query=query,
+                table_name=table_name,
+                retrieval_k=retrieval_k,
+                pre_rerank_k=pre_rerank_k,
+                post_rerank_k=post_rerank_k,
+                search_type=search_type,
+                dense_weight=dense_weight,
+                apply_ai_rerank=apply_ai_rerank,
+            )
+
+            self.send_json_response(result)
+        except json.JSONDecodeError:
+            self.send_json_response({"error": "Invalid JSON", "error_code": "invalid_json"}, status_code=400)
+        except ValueError as e:
+            self.send_json_response({"error": str(e), "error_code": "invalid_request"}, status_code=400)
+        except Exception as e:
+            self.send_json_response({"error": f"Diagnostics error: {e}", "error_code": "diagnostics_failed"}, status_code=500)
+
     def send_json_response(self, data, status_code=200):
         """Utility to send a JSON response with CORS headers."""
+        response_data = data
+        if status_code >= 400:
+            if isinstance(data, dict):
+                error_message = data.get("error")
+                if isinstance(error_message, dict):
+                    error_message = error_message.get("message", "Request failed")
+                elif error_message is None:
+                    error_message = data.get("message", "Request failed")
+
+                response_data = {
+                    "success": False,
+                    "error": str(error_message),
+                    "error_code": data.get("error_code") or self._default_error_code(status_code),
+                }
+                if "details" in data:
+                    response_data["details"] = data["details"]
+            else:
+                response_data = {
+                    "success": False,
+                    "error": "Request failed",
+                    "error_code": self._default_error_code(status_code),
+                }
+
         self.send_response(status_code)
+        self.send_header('X-Request-ID', str(getattr(self, "request_id", _resolve_request_id(None))))
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        response = json.dumps(data, indent=2)
+        response = json.dumps(response_data, indent=2)
         self.wfile.write(response.encode('utf-8'))
+        duration_ms = int((time.time() - getattr(self, "request_started_at", time.time())) * 1000)
+        LOGGER.info(
+            "request_finished request_id=%s method=%s path=%s status=%s duration_ms=%s",
+            getattr(self, "request_id", "n/a"),
+            getattr(self, "command", "unknown"),
+            self.path,
+            status_code,
+            duration_ms,
+        )
+        path = urlparse(self.path).path
+        RAG_METRICS.record_request(
+            method=getattr(self, "command", "UNKNOWN"),
+            path=path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+        )
+
+    def log_message(self, format, *args):
+        LOGGER.info(
+            "http_access request_id=%s client=%s message=%s",
+            getattr(self, "request_id", "n/a"),
+            getattr(self, "client_address", ("unknown",))[0],
+            format % args,
+        )
+
+    def _default_error_code(self, status_code: int) -> str:
+        if status_code == 400:
+            return "bad_request"
+        if status_code == 401:
+            return "unauthorized"
+        if status_code == 403:
+            return "forbidden"
+        if status_code == 404:
+            return "not_found"
+        if status_code == 409:
+            return "conflict"
+        if status_code >= 500:
+            return "internal_error"
+        return "request_error"
 
 def start_server(port=8001):
     """Starts the API server."""
@@ -754,4 +1141,9 @@ def start_server(port=8001):
 
 if __name__ == "__main__":
     # To run this server: python -m rag_system.api_server
-    start_server() 
+    try:
+        configured_port = int(os.getenv("RAG_API_PORT", "8001"))
+    except ValueError:
+        print(" Invalid RAG_API_PORT value, falling back to 8001")
+        configured_port = 8001
+    start_server(port=configured_port)

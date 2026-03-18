@@ -224,11 +224,11 @@ UPLOADS_PATH=./shared_uploads
 INDEX_STORE_PATH=./index_store
 
 # Model Configuration
-DEFAULT_EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
+DEFAULT_EMBEDDING_MODEL=nomic-embed-text:v1.5
 # Default model names - updated to current versions
 DEFAULT_GENERATION_MODEL=gemma3:12b-cloud
 DEFAULT_RERANKER_MODEL=answerdotai/answerai-colbert-small-v1
-DEFAULT_ENRICHMENT_MODEL=gemma3:4b-cloud
+DEFAULT_ENRICHMENT_MODEL=gemma3:12b-cloud
 
 # Performance Configuration
 MAX_CONCURRENT_REQUESTS=5
@@ -281,7 +281,7 @@ log "Step 7: Installing AI models..."
 
 info "Pulling required Ollama models..."
 ollama pull gemma3:12b-cloud
-ollama pull gemma3:4b-cloud
+ollama pull nomic-embed-text:v1.5
 
 info "Verifying model installation..."
 ollama list

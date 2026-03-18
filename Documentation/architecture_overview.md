@@ -18,9 +18,14 @@ flowchart LR
         FE -->|HTTP/JSON| BE["Python HTTP Server\nbackend/server.py"]
     end
 
+    subgraph API["RAG API Service"]
+        RAGAPI["Advanced RAG API\nrag_system/api_server.py"]
+        BE -->|Internal HTTP| RAGAPI
+    end
+
     subgraph Core["rag_system core package"]
-        BE --> LOOP["Agent Loop\n(rag_system/agent/loop.py)"]
-        BE --> IDX["Indexing Pipeline\n(pipelines/indexing_pipeline.py)"]
+        RAGAPI --> LOOP["Agent Loop\n(rag_system/agent/loop.py)"]
+        RAGAPI --> IDX["Indexing Pipeline\n(pipelines/indexing_pipeline.py)"]
 
         LOOP --> RP["Retrieval Pipeline\n(pipelines/retrieval_pipeline.py)"]
         LOOP --> VER["Verifier (Grounding Check)"]
@@ -48,20 +53,26 @@ flowchart LR
     RP -->|rerank| HF
 
     BE -->|CRUD| SQL
+    RAGAPI -->|Index metadata updates| SQL
 ```
 
 ---
 
 ### Data-flow Narrative
 1. **User** interacts with the Next.js UI; messages are posted via `src/lib/api.ts`.
-2. **backend/server.py** receives JSON over HTTP, applies CORS, and proxies the request into `rag_system`.
+2. **backend/server.py** receives JSON over HTTP, applies CORS, handles sessions/index metadata, and calls the RAG API over internal HTTP.
 3. **Agent Loop** decides (via _Triage_) whether to perform Retrieval-Augmented Generation (RAG) or direct LLM answering.
 4. If RAG is chosen:
    1. **Retrieval Pipeline** fetches candidates from **LanceDB** using BM25 + dense vectors.
    2. **AI Reranker** (HF model) sorts snippets.
    3. **Answer Synthesiser** calls **Ollama** to write the final answer.
 5. Answers can be **Verified** for grounding (optional flag).
-6. Index-building is an offline path triggered from the UI  PDF/ files are chunked, embedded and stored in LanceDB.
+6. Index-building is triggered via backend routes (`/indexes/<id>/build` or `/sessions/<id>/index`) which call RAG API `/index`; files are chunked, embedded, and stored in LanceDB.
+
+### Observability Hooks
+- Backend metrics endpoint: `GET /metrics` on port `8000`
+- RAG API metrics endpoint: `GET /metrics` on port `8001`
+- Correlation header across services: `X-Request-ID`
 
 ---
 

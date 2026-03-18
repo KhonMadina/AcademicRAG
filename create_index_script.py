@@ -44,8 +44,8 @@ class IndexCreator:
         # Initialize Ollama client
         self.ollama_client = OllamaClient()
         self.ollama_config = {
-            "generation_model": "gemma3:4b-cloud",
-            "embedding_model": "gemma3:4b-cloud"
+            "generation_model": "gemma3:12b-cloud",
+            "embedding_model": "nomic-embed-text:v1.5"
         }
         
         # Initialize indexing pipeline
@@ -159,8 +159,8 @@ class IndexCreator:
         
         # Model selection
         print("\nModel Configuration:")
-        embedding_model = self.get_user_input("Embedding model", "Qwen/Qwen3-Embedding-0.6B")
-        generation_model = self.get_user_input("Generation model", "gemma3:4b-cloud")
+        embedding_model = self.get_user_input("Embedding model", "nomic-embed-text:v1.5")
+        generation_model = self.get_user_input("Generation model", "gemma3:12b-cloud")
         
         return {
             "chunk_size": chunk_size,
@@ -326,8 +326,8 @@ def create_sample_batch_config():
             "enable_enrich": True,
             "enable_latechunk": True,
             "enable_docling": True,
-            "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
-            "generation_model": "gemma3:4b-cloud",
+            "embedding_model": "nomic-embed-text:v1.5",
+            "generation_model": "gemma3:12b-cloud",
             "retrieval_mode": "hybrid",
             "window_size": 2
         }

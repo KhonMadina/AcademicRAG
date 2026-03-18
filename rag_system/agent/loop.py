@@ -3,6 +3,7 @@ import json
 import time, asyncio, os
 import numpy as np
 import concurrent.futures
+import threading
 from cachetools import TTLCache, LRUCache
 from rag_system.utils.ollama_client import OllamaClient
 from rag_system.pipelines.retrieval_pipeline import RetrievalPipeline
@@ -34,6 +35,9 @@ class Agent:
         # If set to "session", semantic-cache hits will be restricted to the same chat session.
         # Otherwise (default "global") answers can be reused across sessions.
         self.cache_scope = self.pipeline_configs.get("cache_scope", "global")  # 'global' or 'session'
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_metrics_lock = threading.Lock()
         
         #  NEW: In-memory store for conversational history per session
         self.chat_histories: LRUCache = LRUCache(maxsize=100) # Stores history for 100 recent sessions
@@ -247,6 +251,28 @@ Respond with JSON: {{"category": "<your_choice>"}}
             'session_id': session_id
         }
 
+    def _record_cache_lookup(self, hit: bool):
+        with self._cache_metrics_lock:
+            if hit:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
+
+    def get_cache_metrics(self) -> Dict[str, Any]:
+        with self._cache_metrics_lock:
+            total = self._cache_hits + self._cache_misses
+            hit_rate = (self._cache_hits / total) if total else 0.0
+            return {
+                "semantic_cache": {
+                    "lookups": total,
+                    "hits": self._cache_hits,
+                    "misses": self._cache_misses,
+                    "hit_rate": round(hit_rate, 4),
+                    "scope": self.cache_scope,
+                    "threshold": self.semantic_cache_threshold,
+                }
+            }
+
     # ---------------- Public sync API (kept for backwards compatibility) --------------
     def run(self, query: str, table_name: str = None, session_id: str = None, compose_sub_answers: Optional[bool] = None, query_decompose: Optional[bool] = None, ai_rerank: Optional[bool] = None, context_expand: Optional[bool] = None, verify: Optional[bool] = None, retrieval_k: Optional[int] = None, context_window_size: Optional[int] = None, reranker_top_k: Optional[int] = None, search_type: Optional[str] = None, dense_weight: Optional[float] = None, max_retries: int = 1, event_callback: Optional[callable] = None) -> Dict[str, Any]:
         """Synchronous helper. If *event_callback* is supplied, important
@@ -341,11 +367,13 @@ Respond with JSON: {{"category": "<your_choice>"}}
                 cached_result = self._find_in_semantic_cache(query_embedding, session_id)
 
                 if cached_result:
+                    self._record_cache_lookup(hit=True)
                     # Update history even on cache hit
                     if session_id:
                         history.append({"query": query, "answer": cached_result.get('answer', 'Cached answer not found.')})
                         self.chat_histories[session_id] = history
                     return cached_result
+                self._record_cache_lookup(hit=False)
 
         if query_type == "direct_answer":
             print(f" ROUTING DEBUG: Executing DIRECT_ANSWER path")
@@ -394,7 +422,16 @@ Respond with JSON: {{"category": "<your_choice>"}}
                 # Use the raw user query (without conversation history) for decomposition to avoid leakage of prior context
                 # Pass the last 5 conversation turns for context resolution within the decomposer
                 recent_history = history[-5:] if history else []
-                sub_queries = self.query_decomposer.decompose(raw_query, recent_history)
+                max_sub_queries = query_decomp_config.get("max_sub_queries", 3)
+                try:
+                    max_sub_queries = max(1, int(max_sub_queries))
+                except (TypeError, ValueError):
+                    max_sub_queries = 3
+                sub_queries = self.query_decomposer.decompose(
+                    raw_query,
+                    recent_history,
+                    max_sub_queries=max_sub_queries,
+                )
                 if event_callback:
                     event_callback("decomposition", {"sub_queries": sub_queries})
                 print(f"Original query: '{query}' (Contextual: '{contextual_query}')")
@@ -595,12 +632,22 @@ FINAL ANSWER:
         
         # Verification step (simplified for now) - Skip in fast mode
         verification_enabled = self.pipeline_configs.get("verification", {}).get("enabled", True)
+        verification_cfg = self.pipeline_configs.get("verification", {})
+        min_confidence_score = int(verification_cfg.get("min_confidence_score", 50))
         if verify is not None:
             verification_enabled = verify
             
         if verification_enabled and result.get("source_documents"):
             context_str = "\n".join([doc['text'] for doc in result['source_documents']])
             verification = await self.verifier.verify_async(contextual_query, context_str, result['answer'])
+            result['verification'] = {
+                "enabled": True,
+                "is_grounded": bool(verification.is_grounded),
+                "verdict": verification.verdict,
+                "confidence_score": int(verification.confidence_score),
+                "reasoning": verification.reasoning,
+                "min_confidence_score": min_confidence_score,
+            }
             
             score = verification.confidence_score
 
@@ -608,13 +655,21 @@ FINAL ANSWER:
             if score > 0:
                 result['answer'] += f" [Confidence: {score}%]"
                 # Add warning only when the verifier explicitly reported low confidence / not grounded
-                if (not verification.is_grounded) or score < 50:
+                if (not verification.is_grounded) or score < min_confidence_score:
                     result['answer'] += f" [Warning: Low confidence. Groundedness: {verification.is_grounded}]"
             else:
                 # Skip appending any verifier note  0 likely indicates a parser error
                 print("  Verifier returned 0 confidence  likely JSON parse error; omitting tags.")
         else:
             print(" Skipping verification for speed or lack of sources")
+            result['verification'] = {
+                "enabled": False,
+                "is_grounded": None,
+                "verdict": None,
+                "confidence_score": None,
+                "reasoning": None,
+                "min_confidence_score": min_confidence_score,
+            }
         
         #  NEW: Update history
         if session_id:

@@ -17,12 +17,12 @@ export interface Step {
   key: string;
   label: string;
   status: 'pending' | 'active' | 'done';
-  details: any;
+  details: unknown;
 }
 
 export interface ChatMessage {
   id: string;
-  content: string | Array<Record<string, any>> | { steps: Step[] };
+  content: string | Array<Record<string, unknown>> | { steps: Step[] };
   sender: 'user' | 'assistant';
   timestamp: string;
   isLoading?: boolean;
@@ -81,14 +81,271 @@ export interface SessionChatResponse {
   ai_message_id: string;
 }
 
+export interface IndexDocument {
+  filename?: string;
+  [key: string]: unknown;
+}
+
+export interface IndexSummary {
+  id?: string;
+  index_id?: string;
+  name: string;
+  title?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+  documents?: IndexDocument[];
+  metadata?: Record<string, unknown>;
+  session?: ChatSession;
+  model_used?: string;
+  [key: string]: unknown;
+}
+
+export interface IndexBuildResponse {
+  message: string;
+  index_id?: string;
+  status?: string;
+}
+
+export interface IndexListResponse {
+  indexes: IndexSummary[];
+  total: number;
+}
+
+type StreamEvent = {
+  type: string;
+  data: Record<string, unknown>;
+};
+
+type ErrorContext = 'chat' | 'upload' | 'index' | 'stream' | 'generic';
+
+export class ApiServiceError extends Error {
+  status?: number;
+  errorCode?: string;
+  context: ErrorContext;
+  userMessage: string;
+
+  constructor(params: {
+    message: string;
+    context: ErrorContext;
+    status?: number;
+    errorCode?: string;
+    userMessage: string;
+  }) {
+    super(params.message);
+    this.name = 'ApiServiceError';
+    this.status = params.status;
+    this.errorCode = params.errorCode;
+    this.context = params.context;
+    this.userMessage = params.userMessage;
+  }
+}
+
 class ChatAPI {
+  private inFlightGetRequests = new Map<string, Promise<unknown>>();
+  private getResponseCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+  private buildActionableMessage(context: ErrorContext, status?: number, errorCode?: string, serverMessage?: string): string {
+    const normalizedMessage = String(serverMessage || '').toLowerCase();
+    const normalizedCode = String(errorCode || '').toLowerCase();
+
+    if (
+      normalizedMessage.includes('failed to fetch') ||
+      normalizedMessage.includes('networkerror') ||
+      normalizedMessage.includes('network error') ||
+      normalizedMessage.includes('econnreset') ||
+      normalizedMessage.includes('connection reset') ||
+      normalizedMessage.includes('forcibly closed')
+    ) {
+      return 'Connection issue detected. Verify the backend is running (`python run_system.py`), then retry.';
+    }
+
+    if (normalizedMessage.includes('ollama is not running') || normalizedCode === 'service_unavailable') {
+      return 'Model service is unavailable. Start Ollama, wait for readiness, then retry your request.';
+    }
+
+    if (status === 413 || normalizedMessage.includes('exceeds 50mb')) {
+      return 'Upload is too large. Reduce total file size below 50MB and upload again.';
+    }
+
+    if (normalizedMessage.includes('no files were uploaded') || normalizedMessage.includes('no files uploaded')) {
+      return 'No files were detected. Attach one or more supported files and retry upload.';
+    }
+
+    if (normalizedMessage.includes('no documents to index')) {
+      return 'No uploaded documents found. Upload files first, then run indexing.';
+    }
+
+    if (normalizedMessage.includes('session not found')) {
+      return 'This chat session is no longer available. Refresh and create or select another session.';
+    }
+
+    if (normalizedCode === 'invalid_json' || normalizedCode === 'invalid_request' || normalizedCode === 'validation_error' || status === 400) {
+      if (context === 'upload') {
+        return 'Upload request was invalid. Check selected files and try again.';
+      }
+      if (context === 'chat' || context === 'stream') {
+        return 'Message request was invalid. Edit your prompt/settings and try again.';
+      }
+      return 'Request was invalid. Review inputs and retry.';
+    }
+
+    if (status === 404) {
+      return 'Requested resource was not found. Refresh the page and retry.';
+    }
+
+    if (status === 503) {
+      return 'Service is temporarily unavailable. Wait a moment and retry.';
+    }
+
+    if (context === 'upload') {
+      return 'Upload failed. Check file format/size and retry.';
+    }
+    if (context === 'chat' || context === 'stream') {
+      return 'Message failed. Retry, and if this persists, verify backend and model services are healthy.';
+    }
+    if (context === 'index') {
+      return 'Indexing failed. Verify uploaded documents and service health, then retry.';
+    }
+    return 'Request failed. Please retry.';
+  }
+
+  private async createApiError(response: Response, context: ErrorContext, fallbackPrefix: string): Promise<ApiServiceError> {
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    const serverError = typeof payload.error === 'string' ? payload.error : response.statusText || 'Unknown error';
+    const errorCode = typeof payload.error_code === 'string' ? payload.error_code : undefined;
+    const message = `${fallbackPrefix}: ${serverError}`;
+    const userMessage = this.buildActionableMessage(context, response.status, errorCode, serverError);
+
+    return new ApiServiceError({
+      message,
+      context,
+      status: response.status,
+      errorCode,
+      userMessage,
+    });
+  }
+
+  private toApiError(error: unknown, context: ErrorContext, fallbackPrefix: string): ApiServiceError {
+    if (error instanceof ApiServiceError) {
+      return error;
+    }
+
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    return new ApiServiceError({
+      message: `${fallbackPrefix}: ${rawMessage}`,
+      context,
+      userMessage: this.buildActionableMessage(context, undefined, undefined, rawMessage),
+    });
+  }
+
+  public getActionableErrorMessage(error: unknown, context: ErrorContext = 'generic'): string {
+    if (error instanceof ApiServiceError && error.userMessage) {
+      return error.userMessage;
+    }
+    return this.toApiError(error, context, 'Request failed').userMessage;
+  }
+
+  private async getJson<T>(
+    url: string,
+    options: {
+      cacheTtlMs?: number;
+      cacheKey?: string;
+      errorMessage?: string;
+    } = {},
+  ): Promise<T> {
+    const { cacheTtlMs = 0, cacheKey = url, errorMessage = 'Request failed' } = options;
+    const now = Date.now();
+
+    if (cacheTtlMs > 0) {
+      const cached = this.getResponseCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        return cached.value as T;
+      }
+    }
+
+    const inFlight = this.inFlightGetRequests.get(cacheKey);
+    if (inFlight) {
+      return inFlight as Promise<T>;
+    }
+
+    const requestPromise = (async () => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`${errorMessage}: ${response.status}`);
+      }
+
+      const payload = await response.json();
+
+      if (cacheTtlMs > 0) {
+        this.getResponseCache.set(cacheKey, {
+          expiresAt: Date.now() + cacheTtlMs,
+          value: payload,
+        });
+      }
+
+      return payload as T;
+    })();
+
+    this.inFlightGetRequests.set(cacheKey, requestPromise as Promise<unknown>);
+
+    try {
+      return await requestPromise;
+    } finally {
+      if (this.inFlightGetRequests.get(cacheKey) === requestPromise) {
+        this.inFlightGetRequests.delete(cacheKey);
+      }
+    }
+  }
+
+  private invalidateGetCache(match: string | RegExp): void {
+    for (const key of this.getResponseCache.keys()) {
+      const matched = typeof match === 'string' ? key.includes(match) : match.test(key);
+      if (matched) {
+        this.getResponseCache.delete(key);
+      }
+    }
+  }
+
+  private normalizeIndexListResponse(payload: unknown): IndexListResponse {
+    const rawIndexes = Array.isArray(payload)
+      ? payload
+      : Array.isArray((payload as { indexes?: unknown[] })?.indexes)
+        ? (payload as { indexes: unknown[] }).indexes
+        : [];
+
+    const indexes: IndexSummary[] = rawIndexes
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .map((item) => {
+        const rawId = item.id ?? item.index_id;
+        const rawName = item.name ?? item.title;
+        const normalizedId = typeof rawId === 'string' ? rawId : undefined;
+        const normalizedName =
+          typeof rawName === 'string' && rawName.trim().length > 0
+            ? rawName
+            : normalizedId ?? 'Untitled index';
+
+        return {
+          ...item,
+          ...(normalizedId ? { id: normalizedId, index_id: normalizedId } : {}),
+          name: normalizedName,
+        } as IndexSummary;
+      });
+
+    const rawTotal = !Array.isArray(payload) && typeof payload === 'object'
+      ? (payload as { total?: unknown }).total
+      : undefined;
+    const total = typeof rawTotal === 'number' ? rawTotal : indexes.length;
+
+    return { indexes, total };
+  }
+
   async checkHealth(): Promise<HealthResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/health`);
-      if (!response.ok) {
-        throw new Error(`Health check failed: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<HealthResponse>(`${API_BASE_URL}/health`, {
+        cacheTtlMs: 3000,
+        errorMessage: 'Health check failed',
+      });
     } catch (error) {
       console.error('Health check failed:', error);
       throw error;
@@ -104,7 +361,7 @@ class ChatAPI {
         },
         body: JSON.stringify({
           message: request.message,
-          model: request.model || 'llama3.2:latest',
+          model: request.model || 'gemma3:12b-cloud',
           conversation_history: request.conversation_history || [],
         }),
       });
@@ -134,18 +391,17 @@ class ChatAPI {
   // Session Management
   async getSessions(): Promise<SessionResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/sessions`);
-      if (!response.ok) {
-        throw new Error(`Failed to get sessions: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<SessionResponse>(`${API_BASE_URL}/sessions`, {
+        cacheTtlMs: 1500,
+        errorMessage: 'Failed to get sessions',
+      });
     } catch (error) {
       console.error('Get sessions failed:', error);
       throw error;
     }
   }
 
-  async createSession(title: string = 'New Chat', model: string = 'llama3.2:latest'): Promise<ChatSession> {
+  async createSession(title: string = 'New Chat', model: string = 'gemma3:12b-cloud'): Promise<ChatSession> {
     try {
       const response = await fetch(`${API_BASE_URL}/sessions`, {
         method: 'POST',
@@ -160,6 +416,7 @@ class ChatAPI {
       }
 
       const data = await response.json();
+      this.invalidateGetCache('/sessions');
       return data.session;
     } catch (error) {
       console.error('Create session failed:', error);
@@ -169,11 +426,10 @@ class ChatAPI {
 
   async getSession(sessionId: string): Promise<{ session: ChatSession; messages: ChatMessage[] }> {
     try {
-      const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}`);
-      if (!response.ok) {
-        throw new Error(`Failed to get session: ${response.status}`);
-      }
-      return await response.json();
+      return await this.getJson<{ session: ChatSession; messages: ChatMessage[] }>(`${API_BASE_URL}/sessions/${sessionId}`, {
+        cacheTtlMs: 700,
+        errorMessage: 'Failed to get session',
+      });
     } catch (error) {
       console.error('Get session failed:', error);
       throw error;
@@ -199,7 +455,7 @@ class ChatAPI {
       forceRag?: boolean;
       provencePrune?: boolean;
     } = {}
-  ): Promise<SessionChatResponse & { source_documents: any[] }> {
+  ): Promise<SessionChatResponse & { source_documents: unknown[] }> {
     try {
       const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/messages`, {
         method: 'POST',
@@ -226,14 +482,15 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(`Session chat error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'chat', 'Session chat error');
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Session chat failed:', error);
-      throw error;
+      throw this.toApiError(error, 'chat', 'Session chat error');
     }
   }
 
@@ -247,8 +504,10 @@ class ChatAPI {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(`Delete session error: ${errorData.error || response.statusText}`);
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Delete session failed:', error);
       throw error;
@@ -269,8 +528,10 @@ class ChatAPI {
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
         throw new Error(`Rename session error: ${errorData.error || response.statusText}`);
       }
-
-      return await response.json();
+      const payload = await response.json();
+      this.invalidateGetCache('/sessions');
+      this.invalidateGetCache(`/sessions/${sessionId}`);
+      return payload;
     } catch (error) {
       console.error('Rename session failed:', error);
       throw error;
@@ -309,13 +570,12 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
-        throw new Error(`Upload error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'upload', 'Upload error');
       }
       return await response.json();
     } catch (error) {
       console.error('File upload failed:', error);
-      throw error;
+      throw this.toApiError(error, 'upload', 'Upload error');
     }
   }
 
@@ -329,22 +589,21 @@ class ChatAPI {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Indexing failed' }));
-        throw new Error(`Indexing error: ${errorData.error || response.statusText}`);
+        throw await this.createApiError(response, 'index', 'Indexing error');
       }
       return await response.json();
     } catch (error) {
       console.error('Indexing failed:', error);
-      throw error;
+      throw this.toApiError(error, 'index', 'Indexing error');
     }
   }
 
   // Legacy upload function - can be removed if no longer needed
   async uploadPDFs(sessionId: string, files: File[]): Promise<{ 
     message: string; 
-    uploaded_files: any[]; 
-    processing_results: any[];
-    session_documents: any[];
+    uploaded_files: unknown[]; 
+    processing_results: unknown[];
+    session_documents: unknown[];
     total_session_documents: number;
   }> {
     try {
@@ -420,24 +679,22 @@ class ChatAPI {
 
   // ---------------- Models ----------------
   async getModels(): Promise<ModelsResponse> {
-    const resp = await fetch(`${API_BASE_URL}/models`);
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch models list: ${resp.status}`);
-    }
-    return resp.json();
+    return this.getJson<ModelsResponse>(`${API_BASE_URL}/models`, {
+      cacheTtlMs: 30000,
+      errorMessage: 'Failed to fetch models list',
+    });
   }
 
   async getSessionDocuments(sessionId: string): Promise<{ files: string[]; file_count: number; session: ChatSession }> {
-    const resp = await fetch(`${API_BASE_URL}/sessions/${sessionId}/documents`);
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch session documents: ${resp.status}`);
-    }
-    return resp.json();
+    return this.getJson<{ files: string[]; file_count: number; session: ChatSession }>(`${API_BASE_URL}/sessions/${sessionId}/documents`, {
+      cacheTtlMs: 1500,
+      errorMessage: 'Failed to fetch session documents',
+    });
   }
 
   // ---------- Index endpoints ----------
 
-  async createIndex(name: string, description?: string, metadata: Record<string, unknown> = {}): Promise<{ index_id: string }> {
+  async createIndex(name: string, description?: string, metadata: Record<string, unknown> = {}): Promise<{ index_id: string; reused?: boolean }> {
     const resp = await fetch(`${API_BASE_URL}/indexes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -447,10 +704,12 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Create index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache('/indexes');
+    return payload;
   }
 
-  async uploadFilesToIndex(indexId: string, files: File[]): Promise<{ message: string; uploaded_files: any[] }> {
+  async uploadFilesToIndex(indexId: string, files: File[]): Promise<{ message: string; uploaded_files: unknown[] }> {
     const fd = new FormData();
     files.forEach((f) => fd.append('files', f, f.name));
     const resp = await fetch(`${API_BASE_URL}/indexes/${indexId}/upload`, { method: 'POST', body: fd });
@@ -458,7 +717,17 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Upload to index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/indexes/${indexId}`);
+    this.invalidateGetCache('/indexes');
+    return payload;
+  }
+
+  async getIndex(indexId: string): Promise<IndexSummary> {
+    return this.getJson<IndexSummary>(`${API_BASE_URL}/indexes/${indexId}`, {
+      cacheTtlMs: 1200,
+      errorMessage: 'Get index error',
+    });
   }
 
   async buildIndex(indexId: string, opts: { 
@@ -474,38 +743,96 @@ class ChatAPI {
     overviewModel?: string;
     batchSizeEmbed?: number;
     batchSizeEnrich?: number;
-  } = {}): Promise<{ message: string }> {
+  } = {}): Promise<IndexBuildResponse> {
     try {
-      const response = await fetch(`${API_BASE_URL}/indexes/${indexId}/build`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          latechunk: opts.latechunk ?? false,
-          doclingChunk: opts.doclingChunk ?? false,
-          chunkSize: opts.chunkSize ?? 512,
-          chunkOverlap: opts.chunkOverlap ?? 64,
-          retrievalMode: opts.retrievalMode ?? 'hybrid',
-          windowSize: opts.windowSize ?? 2,
-          enableEnrich: opts.enableEnrich ?? true,
-          embeddingModel: opts.embeddingModel,
-          enrichModel: opts.enrichModel,
-          overviewModel: opts.overviewModel,
-          batchSizeEmbed: opts.batchSizeEmbed ?? 50,
-          batchSizeEnrich: opts.batchSizeEnrich ?? 25,
-        }),
+      const requestBody = JSON.stringify({ 
+        latechunk: opts.latechunk ?? false,
+        doclingChunk: opts.doclingChunk ?? false,
+        chunkSize: opts.chunkSize ?? 512,
+        chunkOverlap: opts.chunkOverlap ?? 64,
+        retrievalMode: opts.retrievalMode ?? 'hybrid',
+        windowSize: opts.windowSize ?? 2,
+        enableEnrich: opts.enableEnrich ?? true,
+        embeddingModel: opts.embeddingModel,
+        enrichModel: opts.enrichModel,
+        overviewModel: opts.overviewModel,
+        batchSizeEmbed: opts.batchSizeEmbed ?? 50,
+        batchSizeEnrich: opts.batchSizeEnrich ?? 25,
       });
 
-      if (!response.ok) {
+      const isTransientError = (msg: string) =>
+        /Connection aborted|ConnectionResetError|forcibly closed by the remote host|ECONNRESET|Failed to fetch|NetworkError/i.test(msg);
+
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const pollBuildStatus = async (): Promise<IndexBuildResponse> => {
+        const startedAt = Date.now();
+        const timeoutMs = 45 * 60 * 1000;
+
+        while (Date.now() - startedAt < timeoutMs) {
+          const index = await this.getIndex(indexId);
+          const metadata = (index.metadata ?? {}) as Record<string, unknown>;
+          const status = String(metadata.status ?? 'unknown');
+
+          if (status === 'functional' || status === 'ready' || status === 'completed') {
+            return { message: 'Index build completed.', index_id: indexId, status };
+          }
+
+          if (status === 'failed') {
+            const errorText = String(metadata.build_error ?? 'Unknown indexing failure');
+            throw new Error(`Build index error: ${errorText}`);
+          }
+
+          await wait(status === 'building' ? 2500 : 1200);
+        }
+
+        throw new Error('Build index error: polling timed out');
+      };
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        let response: Response;
+        try {
+          response = await fetch(`${API_BASE_URL}/indexes/${indexId}/build`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: requestBody,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (attempt < 2 && isTransientError(message)) {
+            await wait(1200);
+            continue;
+          }
+          throw error;
+        }
+
+        if (response.ok) {
+          const payload = await response.json().catch(() => ({} as IndexBuildResponse));
+          if (response.status === 202 || payload.status === 'building') {
+            return await pollBuildStatus();
+          }
+          return payload;
+        }
+
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(`Build index error: ${errorData.error || response.statusText}`);
+        const message = String(errorData.error || response.statusText || 'Unknown error');
+        if (attempt < 2 && isTransientError(message)) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+
+        throw new Error(`Build index error: ${message}`);
       }
 
-      return await response.json();
+      throw new Error('Build index error: transient retry attempts exhausted');
     } catch (error) {
       console.error('Build index failed:', error);
       throw error;
+    } finally {
+      this.invalidateGetCache(`/indexes/${indexId}`);
+      this.invalidateGetCache('/indexes');
     }
   }
 
@@ -515,21 +842,27 @@ class ChatAPI {
       const err = await resp.json().catch(() => ({}));
       throw new Error(`Link index error: ${err.error || resp.statusText}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/sessions/${sessionId}`);
+    this.invalidateGetCache(`/sessions/${sessionId}/indexes`);
+    this.invalidateGetCache('/sessions');
+    return payload;
   }
 
-  async listIndexes(): Promise<{ indexes: any[]; total: number }> {
-    const resp = await fetch(`${API_BASE_URL}/indexes`);
-    if (!resp.ok) {
-      throw new Error(`Failed to list indexes: ${resp.status}`);
-    }
-    return resp.json();
+  async listIndexes(): Promise<IndexListResponse> {
+    const payload = await this.getJson<unknown>(`${API_BASE_URL}/indexes`, {
+      cacheTtlMs: 2500,
+      errorMessage: 'Failed to list indexes',
+    });
+    return this.normalizeIndexListResponse(payload);
   }
 
-  async getSessionIndexes(sessionId: string): Promise<{ indexes: any[]; total: number }> {
-    const resp = await fetch(`${API_BASE_URL}/sessions/${sessionId}/indexes`);
-    if (!resp.ok) throw new Error(`Failed to get session indexes: ${resp.status}`);
-    return resp.json();
+  async getSessionIndexes(sessionId: string): Promise<IndexListResponse> {
+    const payload = await this.getJson<unknown>(`${API_BASE_URL}/sessions/${sessionId}/indexes`, {
+      cacheTtlMs: 1200,
+      errorMessage: 'Failed to get session indexes',
+    });
+    return this.normalizeIndexListResponse(payload);
   }
 
   async deleteIndex(indexId: string): Promise<{ message: string }> {
@@ -540,7 +873,11 @@ class ChatAPI {
       const data = await resp.json().catch(() => ({ error: 'Unknown error'}));
       throw new Error(data.error || `Failed to delete index: ${resp.status}`);
     }
-    return resp.json();
+    const payload = await resp.json();
+    this.invalidateGetCache(`/indexes/${indexId}`);
+    this.invalidateGetCache('/indexes');
+    this.invalidateGetCache('/sessions');
+    return payload;
   }
 
   // -------------------- Streaming (SSE-over-fetch) --------------------
@@ -564,7 +901,7 @@ class ChatAPI {
       forceRag?: boolean;
       provencePrune?: boolean;
     },
-    onEvent: (event: { type: string; data: any }) => void,
+    onEvent: (event: StreamEvent) => void,
   ): Promise<void> {
     const { query, model, session_id, table_name, composeSubAnswers, decompose, aiRerank, contextExpand, verify, retrievalK, contextWindowSize, rerankerTopK, searchType, denseWeight, forceRag, provencePrune } = params;
 
@@ -593,7 +930,10 @@ class ChatAPI {
     });
 
     if (!resp.ok || !resp.body) {
-      throw new Error(`Stream request failed: ${resp.status}`);
+      if (!resp.ok) {
+        throw await this.createApiError(resp, 'stream', 'Stream request failed');
+      }
+      throw this.toApiError(new Error(`Missing stream body: ${resp.status}`), 'stream', 'Stream request failed');
     }
 
     const reader = resp.body.getReader();
@@ -614,7 +954,7 @@ class ChatAPI {
         if (!line.startsWith('data:')) continue;
         const jsonStr = line.replace(/^data:\s*/, '');
         try {
-          const evt = JSON.parse(jsonStr);
+          const evt = JSON.parse(jsonStr) as StreamEvent;
           onEvent(evt);
           if (evt.type === 'complete') {
             // Gracefully close the stream so the caller unblocks

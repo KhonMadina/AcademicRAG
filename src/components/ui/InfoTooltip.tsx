@@ -20,7 +20,7 @@ export function InfoTooltip({ text, className = "", size = 14 }: Props) {
       onBlur={() => setOpen(false)}
       tabIndex={0}
     >
-      <Info size={size} className="text-gray-400 hover:text-white cursor-pointer z-50" />
+      <Info size={size} className="text-gray-400 cursor-pointer z-50" />
       {open && (
         <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-56 bg-gray-700 backdrop-blur-sm text-gray-200 text-xs px-3 py-2 rounded shadow-lg z-50 normal-case whitespace-normal break-words">
           {text}

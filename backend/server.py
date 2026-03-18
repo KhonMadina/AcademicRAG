@@ -8,6 +8,12 @@ from urllib.parse import urlparse, parse_qs
 import requests  #  Import requests for making HTTP calls
 import sys
 from datetime import datetime
+import time
+import threading
+import traceback
+import logging
+from logging.handlers import RotatingFileHandler
+from collections import defaultdict
 
 # Add parent directory to path so we can import rag_system modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,9 +35,420 @@ from simple_pdf_processor import initialize_simple_pdf_processor
 from typing import List, Dict, Any
 import re
 
-#  Reusable TCPServer with address reuse enabled
-class ReusableTCPServer(socketserver.TCPServer):
+
+_INDEX_BUILD_LOCK = threading.Lock()
+_ACTIVE_INDEX_BUILDS: set[str] = set()
+_MAX_HISTORY_MESSAGES = max(2, int(os.getenv("OLLAMA_MAX_HISTORY_MESSAGES", "12")))
+_RAG_CHAT_TIMEOUT_SEC = max(30, int(os.getenv("RAG_CHAT_TIMEOUT_SEC", "180")))
+_OVERVIEW_CACHE_TTL_SEC = max(5, int(os.getenv("OVERVIEW_CACHE_TTL_SEC", "120")))
+_OVERVIEW_CACHE_LOCK = threading.Lock()
+_OVERVIEW_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
+_CASUAL_DIRECT_PATTERNS = [
+    'hello', 'hi', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening',
+    'how are you', 'how do you do', 'nice to meet', 'pleasure to meet',
+    'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'talk to you later',
+    'test', 'testing', 'check', 'ping', 'just saying', 'nevermind',
+    'ok', 'okay', 'alright', 'got it', 'understood', 'i see'
+]
+_RAG_INDICATORS = [
+    'document', 'doc', 'file', 'pdf', 'text', 'content', 'page',
+    'according to', 'based on', 'mentioned', 'states', 'says',
+    'what does', 'summarize', 'summary', 'analyze', 'analysis',
+    'quote', 'citation', 'reference', 'source', 'evidence',
+    'explain from', 'extract', 'find in', 'search for'
+]
+_QUESTION_WORDS = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
+
+
+def _is_plain_conversational_message(message: str) -> bool:
+    normalized = " ".join(str(message or "").strip().lower().split())
+    if not normalized:
+        return True
+
+    return any(pattern in normalized for pattern in _CASUAL_DIRECT_PATTERNS)
+
+
+def _prepare_conversation_history(
+    conversation_history: List[Dict[str, Any]] | None,
+    latest_user_message: str,
+    max_messages: int = _MAX_HISTORY_MESSAGES,
+) -> List[Dict[str, str]]:
+    """Trim persisted history for faster follow-up turns and remove duplicated latest user prompts."""
+    latest_normalized = str(latest_user_message or "").strip()
+    prepared: List[Dict[str, str]] = []
+
+    for item in conversation_history or []:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        prepared.append({"role": role, "content": content})
+
+    if prepared and latest_normalized:
+        last_message = prepared[-1]
+        if last_message.get("role") == "user" and last_message.get("content", "").strip() == latest_normalized:
+            prepared.pop()
+
+    if max_messages > 0 and len(prepared) > max_messages:
+        prepared = prepared[-max_messages:]
+
+    return prepared
+
+
+class ServiceMetrics:
+    def __init__(self):
+        self._started_at = time.time()
+        self._lock = threading.Lock()
+        self._requests_total = 0
+        self._requests_by_status: dict[str, int] = defaultdict(int)
+        self._requests_by_endpoint: dict[str, dict[str, float]] = defaultdict(
+            lambda: {
+                "count": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+                "4xx": 0,
+                "5xx": 0,
+            }
+        )
+        self._index_builds = {
+            "count": 0,
+            "success": 0,
+            "failed": 0,
+            "total_duration_ms": 0.0,
+            "max_duration_ms": 0.0,
+            "last_duration_ms": None,
+        }
+
+    def record_request(self, method: str, path: str, status_code: int, duration_ms: float):
+        endpoint_key = f"{method.upper()} {path}"
+        status_bucket = f"{int(status_code) // 100}xx"
+        with self._lock:
+            self._requests_total += 1
+            self._requests_by_status[status_bucket] += 1
+            bucket = self._requests_by_endpoint[endpoint_key]
+            bucket["count"] += 1
+            bucket["total_ms"] += float(duration_ms)
+            bucket["max_ms"] = max(bucket["max_ms"], float(duration_ms))
+            if 400 <= int(status_code) < 500:
+                bucket["4xx"] += 1
+            if int(status_code) >= 500:
+                bucket["5xx"] += 1
+
+    def record_index_build(self, duration_ms: float, success: bool):
+        with self._lock:
+            self._index_builds["count"] += 1
+            if success:
+                self._index_builds["success"] += 1
+            else:
+                self._index_builds["failed"] += 1
+            self._index_builds["total_duration_ms"] += float(duration_ms)
+            self._index_builds["max_duration_ms"] = max(self._index_builds["max_duration_ms"], float(duration_ms))
+            self._index_builds["last_duration_ms"] = float(duration_ms)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            endpoints = {}
+            for key, stats in self._requests_by_endpoint.items():
+                count = int(stats["count"])
+                avg_ms = (stats["total_ms"] / count) if count else 0.0
+                endpoints[key] = {
+                    "count": count,
+                    "avg_ms": round(avg_ms, 2),
+                    "max_ms": round(float(stats["max_ms"]), 2),
+                    "4xx": int(stats["4xx"]),
+                    "5xx": int(stats["5xx"]),
+                }
+
+            index_count = int(self._index_builds["count"])
+            index_avg_ms = (self._index_builds["total_duration_ms"] / index_count) if index_count else 0.0
+
+            return {
+                "uptime_s": round(time.time() - self._started_at, 2),
+                "requests": {
+                    "total": self._requests_total,
+                    "by_status": dict(self._requests_by_status),
+                    "by_endpoint": endpoints,
+                },
+                "indexing": {
+                    "count": index_count,
+                    "success": int(self._index_builds["success"]),
+                    "failed": int(self._index_builds["failed"]),
+                    "avg_duration_ms": round(index_avg_ms, 2),
+                    "max_duration_ms": round(float(self._index_builds["max_duration_ms"]), 2),
+                    "last_duration_ms": self._index_builds["last_duration_ms"],
+                },
+            }
+
+
+def _setup_service_logger(service_name: str, log_filename: str) -> logging.Logger:
+    logger = logging.getLogger(service_name)
+    if logger.handlers:
+        return logger
+
+    os.makedirs("logs", exist_ok=True)
+    max_bytes = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
+    file_handler = RotatingFileHandler(
+        os.path.join("logs", log_filename),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    if os.getenv("LOG_TO_STDOUT", "0") == "1":
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+    logger.propagate = False
+    return logger
+
+
+LOGGER = _setup_service_logger("academicrag.backend", "backend_server.log")
+BACKEND_METRICS = ServiceMetrics()
+
+
+def _resolve_request_id(headers) -> str:
+    if not headers:
+        return uuid.uuid4().hex
+
+    incoming = headers.get("X-Request-ID") or headers.get("X-Correlation-ID")
+    if isinstance(incoming, str):
+        normalized = incoming.strip()
+        if normalized:
+            return normalized[:128]
+
+    return uuid.uuid4().hex
+
+
+def _get_pending_file_paths(all_file_paths: List[str], completed_files=None) -> List[str]:
+    completed = set(completed_files or [])
+    return [path for path in all_file_paths if path not in completed]
+
+
+def _run_index_build_job(index_id: str, file_paths: List[str], table_name: str, options: Dict[str, Any]):
+    """Run a potentially long index build out-of-band and persist progress in index metadata."""
+    build_started_at = time.time()
+    build_success = False
+    rag_api_url = "http://localhost:8001/index"
+    correlation_id = options.get("request_id") or f"build-{uuid.uuid4().hex[:16]}"
+    latechunk = bool(options.get("latechunk", False))
+    docling_chunk = bool(options.get("docling_chunk", False))
+    chunk_size = int(options.get("chunk_size", 512))
+    chunk_overlap = int(options.get("chunk_overlap", 64))
+    retrieval_mode = str(options.get("retrieval_mode", "hybrid"))
+    window_size = int(options.get("window_size", 2))
+    enable_enrich = bool(options.get("enable_enrich", True))
+    embedding_model = options.get("embedding_model")
+    enrich_model = options.get("enrich_model")
+    overview_model = options.get("overview_model")
+    batch_size_embed = int(options.get("batch_size_embed", 50))
+    batch_size_enrich = int(options.get("batch_size_enrich", 25))
+    completed_files = list(options.get("completed_files") or [])
+    failed_files: List[str] = list(options.get("failed_files") or [])
+
+    pending_paths = _get_pending_file_paths(file_paths, completed_files)
+    total_files = len(file_paths)
+
+    if not pending_paths:
+        db.update_index_metadata(index_id, {
+            "status": "functional",
+            "indexing_stage": "done",
+            "indexing_progress": 100.0,
+            "completed_files": completed_files,
+            "failed_files": failed_files,
+            "pending_files": 0,
+            "build_error": None,
+            "build_completed_at": datetime.now().isoformat(),
+        })
+        with _INDEX_BUILD_LOCK:
+            _ACTIVE_INDEX_BUILDS.discard(index_id)
+        return
+
+    db.update_index_metadata(index_id, {
+        "status": "building",
+        "indexing_stage": "parsing",
+        "indexing_progress": 10.0,
+        "indexing_details": {
+            "files_total": total_files,
+            "files_completed": len(completed_files),
+            "files_remaining": len(pending_paths),
+        },
+        "completed_files": completed_files,
+        "failed_files": failed_files,
+        "pending_files": len(pending_paths),
+    })
+
+    try:
+        current_file_path = None
+        for offset, file_path in enumerate(pending_paths, start=1):
+            current_file_path = file_path
+            payload = {
+                "file_paths": [file_path],
+                "session_id": index_id,
+                "table_name": table_name,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "retrieval_mode": retrieval_mode,
+                "window_size": window_size,
+                "enable_enrich": enable_enrich,
+                "batch_size_embed": batch_size_embed,
+                "batch_size_enrich": batch_size_enrich,
+            }
+            if latechunk:
+                payload["enable_latechunk"] = True
+            if docling_chunk:
+                payload["enable_docling_chunk"] = True
+            if embedding_model:
+                payload["embeddingModel"] = embedding_model
+                payload["embedding_model"] = embedding_model
+            if enrich_model:
+                payload["enrichModel"] = enrich_model
+                payload["enrich_model"] = enrich_model
+            if overview_model:
+                payload["overviewModel"] = overview_model
+                payload["overview_model_name"] = overview_model
+
+            parsed_progress = min(95.0, 10.0 + (((len(completed_files) + 1) / max(1, total_files)) * 85.0))
+            db.update_index_metadata(index_id, {
+                "status": "building",
+                "indexing_stage": "parsing",
+                "indexing_progress": parsed_progress,
+                "indexing_details": {
+                    "current_file": os.path.basename(file_path),
+                    "files_total": total_files,
+                    "files_completed": len(completed_files),
+                    "files_remaining": len(_get_pending_file_paths(file_paths, completed_files)),
+                },
+            })
+
+            rag_resp = None
+            last_error = None
+            for attempt in range(1, 4):
+                try:
+                    rag_resp = requests.post(
+                        rag_api_url,
+                        json=payload,
+                        timeout=(10, 1800),
+                        headers={"X-Request-ID": str(correlation_id)},
+                    )
+                    if rag_resp.status_code in (502, 503, 504) and attempt < 3:
+                        wait_s = 1.5 * attempt
+                        print(f"Transient RAG API status {rag_resp.status_code}; retrying build in {wait_s:.1f}s (attempt {attempt}/3)")
+                        time.sleep(wait_s)
+                        continue
+                    break
+                except requests.exceptions.RequestException as e:
+                    last_error = e
+                    if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) and attempt < 3:
+                        wait_s = 1.5 * attempt
+                        print(f"Transient RAG API connection error: {e}; retrying in {wait_s:.1f}s (attempt {attempt}/3)")
+                        time.sleep(wait_s)
+                        continue
+                    raise
+
+            if rag_resp is None and last_error is not None:
+                raise last_error
+
+            if rag_resp.status_code == 200:
+                if file_path not in completed_files:
+                    completed_files.append(file_path)
+                db.update_index_metadata(index_id, {
+                    "status": "building",
+                    "completed_files": completed_files,
+                    "failed_files": failed_files,
+                    "pending_files": len(_get_pending_file_paths(file_paths, completed_files)),
+                    "indexing_progress": min(99.0, 10.0 + ((len(completed_files) / max(1, total_files)) * 88.0)),
+                    "indexing_details": {
+                        "last_completed_file": os.path.basename(file_path),
+                        "files_total": total_files,
+                        "files_completed": len(completed_files),
+                        "files_remaining": len(_get_pending_file_paths(file_paths, completed_files)),
+                    },
+                    "last_build_response": rag_resp.json(),
+                })
+            else:
+                try:
+                    err_json = rag_resp.json()
+                except Exception:
+                    err_json = {}
+                err_text = err_json.get("error") if isinstance(err_json, dict) else rag_resp.text
+                if err_text and "already exists" in str(err_text):
+                    if file_path not in completed_files:
+                        completed_files.append(file_path)
+                    db.update_index_metadata(index_id, {
+                        "status": "building",
+                        "completed_files": completed_files,
+                        "failed_files": failed_files,
+                        "pending_files": len(_get_pending_file_paths(file_paths, completed_files)),
+                        "indexing_details": {
+                            "last_completed_file": os.path.basename(file_path),
+                            "note": str(err_text),
+                        },
+                    })
+                else:
+                    raise RuntimeError(f"RAG indexing failed for {os.path.basename(file_path)}: {err_text or rag_resp.text}")
+
+        meta_updates = {
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
+            "retrieval_mode": retrieval_mode,
+            "window_size": window_size,
+            "enable_enrich": enable_enrich,
+            "latechunk": latechunk,
+            "docling_chunk": docling_chunk,
+            "batch_size_embed": batch_size_embed,
+            "batch_size_enrich": batch_size_enrich,
+            "build_completed_at": datetime.now().isoformat(),
+            "status": "functional",
+            "indexing_stage": "done",
+            "indexing_progress": 100.0,
+            "build_error": None,
+            "completed_files": completed_files,
+            "failed_files": failed_files,
+            "pending_files": 0,
+        }
+        if embedding_model:
+            meta_updates["embedding_model"] = embedding_model
+        if enrich_model:
+            meta_updates["enrich_model"] = enrich_model
+        if overview_model:
+            meta_updates["overview_model"] = overview_model
+        db.update_index_metadata(index_id, meta_updates)
+        build_success = True
+    except Exception as e:
+        if current_file_path and current_file_path not in failed_files:
+            failed_files.append(current_file_path)
+        db.update_index_metadata(index_id, {
+            "status": "failed",
+            "indexing_stage": "failed",
+            "indexing_progress": 100.0,
+            "build_error": str(e),
+            "build_completed_at": datetime.now().isoformat(),
+            "build_traceback": traceback.format_exc(limit=20),
+            "completed_files": completed_files,
+            "failed_files": failed_files,
+            "pending_files": len(_get_pending_file_paths(file_paths, completed_files)),
+        })
+        LOGGER.error("Background build failed for index %s: %s", index_id[:8], e)
+    finally:
+        BACKEND_METRICS.record_index_build(
+            duration_ms=(time.time() - build_started_at) * 1000.0,
+            success=build_success,
+        )
+        with _INDEX_BUILD_LOCK:
+            _ACTIVE_INDEX_BUILDS.discard(index_id)
+
+#  Reusable threaded TCPServer with address reuse enabled
+class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -40,7 +457,17 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     
     def do_OPTIONS(self):
         """Handle CORS preflight requests"""
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "OPTIONS",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         self.send_response(200)
+        self.send_header('X-Request-ID', str(self.request_id))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
@@ -48,15 +475,34 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle GET requests"""
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "GET",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         parsed_path = urlparse(self.path)
         
         if parsed_path.path == '/health':
             self.send_json_response({
                 "status": "ok",
+                "service": "backend",
+                "check": "liveness"
+            })
+        elif parsed_path.path == '/metrics':
+            self.send_json_response(BACKEND_METRICS.snapshot())
+        elif parsed_path.path == '/health/ready':
+            self.send_json_response({
+                "status": "ready" if self._backend_ready() else "not_ready",
+                "service": "backend",
+                "check": "readiness",
                 "ollama_running": self.ollama_client.is_ollama_running(),
                 "available_models": self.ollama_client.list_models(),
                 "database_stats": db.get_stats()
-            })
+            }, status_code=200 if self._backend_ready() else 503)
         elif parsed_path.path == '/sessions':
             self.handle_get_sessions()
         elif parsed_path.path == '/sessions/cleanup':
@@ -78,11 +524,19 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             session_id = parsed_path.path.split('/')[-1]
             self.handle_get_session(session_id)
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_error_response("Not Found", status_code=404, error_code="not_found")
     
     def do_POST(self):
         """Handle POST requests"""
+        self.request_id = _resolve_request_id(self.headers)
+        self.request_started_at = time.time()
+        LOGGER.info(
+            "request_started request_id=%s method=%s path=%s client=%s",
+            self.request_id,
+            "POST",
+            self.path,
+            getattr(self, "client_address", ("unknown",))[0],
+        )
         parsed_path = urlparse(self.path)
         
         if parsed_path.path == '/chat':
@@ -115,8 +569,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             session_id = parsed_path.path.split('/')[-2]
             self.handle_rename_session(session_id)
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_error_response("Not Found", status_code=404, error_code="not_found")
 
     def do_DELETE(self):
         """Handle DELETE requests"""
@@ -129,8 +582,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             index_id = parsed_path.path.split('/')[-1]
             self.handle_delete_index(index_id)
         else:
-            self.send_response(404)
-            self.end_headers()
+            self.send_error_response("Not Found", status_code=404, error_code="not_found")
     
     def handle_chat(self):
         """Handle legacy chat requests (without sessions)"""
@@ -140,7 +592,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             
             message = data.get('message', '')
-            model = data.get('model', 'llama3.2:latest')
+            model = data.get('model', 'gemma3:12b-cloud')
             conversation_history = data.get('conversation_history', [])
             
             if not message:
@@ -250,7 +702,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             
             title = data.get('title', 'New Chat')
-            model = data.get('model', 'llama3.2:latest')
+            model = data.get('model', 'gemma3:12b-cloud')
             
             session_id = db.create_session(title, model)
             session = db.get_session(session_id)
@@ -308,7 +760,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             else:
                 #  --- Use Direct LLM for General Queries (FAST) ---
                 print(f" Using direct LLM for general query: '{message[:50]}...'")
-                response_text, source_docs = self._handle_direct_llm_query(session_id, message, session)
+                response_text, source_docs = self._handle_direct_llm_query(session_id, message, session, data)
 
             # Add AI response to database
             ai_message_id = db.add_message(session_id, response_text, "assistant")
@@ -354,6 +806,10 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         if not idx_ids:
             return False
 
+        # Skip expensive overview routing for clearly conversational prompts.
+        if _is_plain_conversational_message(message):
+            return False
+
         # Load document overviews for intelligent routing
         try:
             doc_overviews = self._load_document_overviews(idx_ids)
@@ -374,6 +830,13 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         3. If none of the index files exist, fall back to the legacy global overview file.
         """
         import os, json
+
+        cache_key = tuple(sorted(str(idx) for idx in idx_ids if idx))
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            cached = _OVERVIEW_CACHE.get(cache_key)
+            if cached and now < cached[0]:
+                return list(cached[1])
 
         aggregated: list[str] = []
 
@@ -435,12 +898,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             print(f" Loaded {len(aggregated)} document overviews from {len(idx_ids)} index(es)")
         else:
             print(f" No overviews found for indices {idx_ids}")
-        return aggregated[:40]
+        limited = aggregated[:40]
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (time.time() + _OVERVIEW_CACHE_TTL_SEC, list(limited))
+        return limited
 
     def _route_using_overviews(self, query: str, overviews: List[str]) -> bool:
         """
          Use document overviews and LLM to make intelligent routing decisions.
-        
         Returns True if RAG should be used, False for direct LLM.
         """
         if not overviews:
@@ -481,7 +946,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             # Use Ollama to make the routing decision
             response = self.ollama_client.chat(
                 message=router_prompt,
-                model="gemma3:4b-cloud",  # Fast model for routing
+                model="gemma3:12b-cloud",  # Fast model for routing
                 enable_thinking=False  # Fast routing
             )
             
@@ -508,50 +973,29 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
          FALLBACK: Simple pattern-based routing (original logic).
         """
         message_lower = message.lower()
-        
-        # Always use Direct LLM for greetings and casual conversation
-        greeting_patterns = [
-            'hello', 'hi', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening',
-            'how are you', 'how do you do', 'nice to meet', 'pleasure to meet',
-            'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'talk to you later',
-            'test', 'testing', 'check', 'ping', 'just saying', 'nevermind',
-            'ok', 'okay', 'alright', 'got it', 'understood', 'i see'
-        ]
-        
-        # Check for greeting patterns
-        for pattern in greeting_patterns:
-            if pattern in message_lower:
-                return False  # Use Direct LLM for greetings
-        
-        # Keywords that strongly suggest document-related queries
-        rag_indicators = [
-            'document', 'doc', 'file', 'pdf', 'text', 'content', 'page',
-            'according to', 'based on', 'mentioned', 'states', 'says',
-            'what does', 'summarize', 'summary', 'analyze', 'analysis',
-            'quote', 'citation', 'reference', 'source', 'evidence',
-            'explain from', 'extract', 'find in', 'search for'
-        ]
-        
+
+        if _is_plain_conversational_message(message_lower):
+            return False
+
         # Check for strong RAG indicators
-        for indicator in rag_indicators:
+        for indicator in _RAG_INDICATORS:
             if indicator in message_lower:
                 return True
-        
+
         # Question words + substantial length might benefit from RAG
-        question_words = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
-        starts_with_question = any(message_lower.startswith(word) for word in question_words)
-        
+        starts_with_question = any(message_lower.startswith(word) for word in _QUESTION_WORDS)
+
         if starts_with_question and len(message) > 40:
             return True
-        
+
         # Very short messages - use direct LLM
         if len(message.strip()) < 20:
             return False
-        
+
         # Default to Direct LLM unless there's clear indication of document query
         return False
     
-    def _handle_direct_llm_query(self, session_id: str, message: str, session: dict):
+    def _handle_direct_llm_query(self, session_id: str, message: str, session: dict, data: dict):
         """
         Handle query using direct Ollama client with thinking disabled for speed.
         
@@ -560,11 +1004,14 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
         """
         try:
             # Get conversation history for context
-            conversation_history = db.get_conversation_history(session_id)
-            
+            conversation_history = _prepare_conversation_history(
+                db.get_conversation_history(session_id),
+                latest_user_message=message,
+            )
+
             # Use the session's model or default
-            model = session.get('model', 'gemma3:12b-cloud')  # Default to fast model
-            
+            model = data.get('model') or session.get('model_used') or session.get('model') or 'gemma3:27b-cloud'
+
             # Direct Ollama call with thinking disabled for speed
             response_text = self.ollama_client.chat(
                 message=message,
@@ -624,7 +1071,12 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     payload[payload_key] = val
 
         try:
-            rag_response = requests.post(rag_api_url, json=payload)
+            rag_response = requests.post(
+                rag_api_url,
+                json=payload,
+                headers={"X-Request-ID": str(getattr(self, "request_id", _resolve_request_id(None)))},
+                timeout=(10, _RAG_CHAT_TIMEOUT_SEC),
+            )
             if rag_response.status_code == 200:
                 rag_data = rag_response.json()
                 response_text = rag_data.get("answer", "No answer found.")
@@ -635,6 +1087,9 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
         except requests.exceptions.ConnectionError:
             response_text = "Could not connect to the RAG API server. Please ensure it is running."
             print(" Connection to RAG API failed (port 8001).")
+        except requests.exceptions.Timeout:
+            response_text = "The RAG API took too long to respond. Please retry your question."
+            print(f" RAG API timed out after {_RAG_CHAT_TIMEOUT_SEC}s.")
         except Exception as e:
             response_text = f"Error processing RAG query: {str(e)}"
             print(f" RAG processing error: {e}")
@@ -707,7 +1162,11 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             print(f"Found {len(file_paths)} documents to index. Sending to RAG API...")
             
             rag_api_url = "http://localhost:8001/index"
-            rag_response = requests.post(rag_api_url, json={"file_paths": file_paths, "session_id": session_id})
+            rag_response = requests.post(
+                rag_api_url,
+                json={"file_paths": file_paths, "session_id": session_id},
+                headers={"X-Request-ID": str(getattr(self, "request_id", _resolve_request_id(None)))},
+            )
 
             if rag_response.status_code == 200:
                 print(" RAG API successfully indexed documents.")
@@ -751,7 +1210,7 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             
             # Get Ollama models if available
             if self.ollama_client.is_ollama_running():
-                all_ollama_models = self.ollama_client.list_models()
+                all_ollama_models = [m for m in self.ollama_client.list_models() if isinstance(m, str) and m.strip()]
                 
                 # Very naive classification - same logic as RAG API server
                 ollama_embedding_models = [m for m in all_ollama_models if any(k in m for k in ['embed','bge','embedding','text'])]
@@ -762,15 +1221,14 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             
             # Add supported HuggingFace embedding models
             huggingface_embedding_models = [
-                "Qwen/Qwen3-Embedding-0.6B",
-                "Qwen/Qwen3-Embedding-4B", 
-                "Qwen/Qwen3-Embedding-8B"
+                "Qwen/Qwen3-Embedding-0.6B", 
+                "Qwen/Qwen3-Embedding-4B"
             ]
             embedding_models.extend(huggingface_embedding_models)
             
-            # Sort models for consistent ordering
-            generation_models.sort()
-            embedding_models.sort()
+            # De-duplicate and sort models for consistent ordering
+            generation_models = sorted(set(generation_models))
+            embedding_models = sorted(set(embedding_models))
             
             self.send_json_response({
                 "generation_models": generation_models,
@@ -822,9 +1280,9 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     'chunk_overlap': 64,  # From default config
                     'retrieval_mode': 'hybrid',  # From default config
                     'window_size': 5,  # From default config
-                    'embedding_model': 'Qwen/Qwen3-Embedding-0.6B',  # From default config
-                    'enrich_model': 'gemma3:4b-cloud',  # From default config
-                    'overview_model': 'gemma3:4b-cloud',  # From default config
+                    'embedding_model': 'nomic-embed-text:v1.5',  # From default config
+                    'enrich_model': 'gemma3:12b-cloud',  # From default config
+                    'overview_model': 'gemma3:12b-cloud',  # From default config
                     'enable_enrich': True,  # From default config
                     'latechunk': True,  # From default config
                     'docling_chunk': True,  # From default config
@@ -833,9 +1291,10 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                 # Merge with any provided metadata
                 complete_metadata.update(metadata)
                 metadata = complete_metadata
-            
+
+            existing = db.get_index_by_name(name)
             idx_id = db.create_index(name, description, metadata)
-            self.send_json_response({'index_id': idx_id}, status_code=201)
+            self.send_json_response({'index_id': idx_id, 'reused': bool(existing)}, status_code=201)
         except Exception as e:
             self.send_json_response({'error': str(e)}, status_code=500)
     
@@ -882,6 +1341,8 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             batch_size_embed = 50
             batch_size_enrich = 25
             overview_model = None
+            resume_build = True
+            force_rebuild = False
             
             if 'Content-Length' in self.headers and int(self.headers['Content-Length']) > 0:
                 try:
@@ -900,89 +1361,120 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
                     batch_size_embed = int(opts.get('batchSizeEmbed', 50))
                     batch_size_enrich = int(opts.get('batchSizeEnrich', 25))
                     overview_model = opts.get('overviewModel')
+                    resume_build = bool(opts.get('resume', True))
+                    force_rebuild = bool(opts.get('forceRebuild', False))
                 except Exception:
                     # Keep defaults on parse error
                     pass
 
-            # Set per-index overview file path
-            overview_path = f"index_store/overviews/{index_id}.jsonl"
+            existing_metadata = index.get("metadata") or {}
+            completed_files = list(existing_metadata.get("completed_files") or [])
+            failed_files = list(existing_metadata.get("failed_files") or [])
 
-            # Ensure config_override includes overview_path
-            def ensure_overview_path(cfg: dict):
-                cfg["overview_path"] = overview_path
-            
-            # we'll inject later when we build config_override
+            if force_rebuild or not resume_build:
+                completed_files = []
+                failed_files = []
 
-            # Delegate to advanced RAG API same as session indexing
-            rag_api_url = "http://localhost:8001/index"
-            import requests, json as _json
-            # Use the index's dedicated LanceDB table so retrieval matches
+            pending_paths = _get_pending_file_paths(file_paths, completed_files)
+
+            if not pending_paths:
+                db.update_index_metadata(index_id, {
+                    "status": "functional",
+                    "indexing_stage": "done",
+                    "indexing_progress": 100.0,
+                    "pending_files": 0,
+                    "completed_files": file_paths,
+                    "failed_files": failed_files,
+                    "build_error": None,
+                })
+                self.send_json_response({
+                    "message": "Index already up to date.",
+                    "index_id": index_id,
+                    "status": "functional",
+                    "pending_files": 0,
+                }, status_code=200)
+                return
+
             table_name = index.get("vector_table_name")
-            payload = {
-                "file_paths": file_paths,
-                "session_id": index_id,  # reuse index_id for progress tracking
-                "table_name": table_name,
+            with _INDEX_BUILD_LOCK:
+                if index_id in _ACTIVE_INDEX_BUILDS or (index.get("metadata") or {}).get("status") == "building":
+                    self.send_json_response({
+                        "message": "Index build already in progress.",
+                        "index_id": index_id,
+                        "status": "building",
+                    }, status_code=202)
+                    return
+                _ACTIVE_INDEX_BUILDS.add(index_id)
+
+            db.update_index_metadata(index_id, {
+                "status": "building",
+                "indexing_stage": "queued",
+                "indexing_progress": 0.0,
+                "indexing_details": {
+                    "files_total": len(file_paths),
+                    "files_completed": len(completed_files),
+                    "files_remaining": len(pending_paths),
+                    "table_name": table_name,
+                },
+                "completed_files": completed_files,
+                "failed_files": failed_files,
+                "pending_files": len(pending_paths),
+                "build_error": None,
+                "build_traceback": None,
+                "build_started_at": datetime.now().isoformat(),
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
                 "retrieval_mode": retrieval_mode,
                 "window_size": window_size,
                 "enable_enrich": enable_enrich,
+                "latechunk": latechunk,
+                "docling_chunk": docling_chunk,
                 "batch_size_embed": batch_size_embed,
-                "batch_size_enrich": batch_size_enrich
-            }
-            if latechunk:
-                payload["enable_latechunk"] = True
-            if docling_chunk:
-                payload["enable_docling_chunk"] = True
-            if embedding_model:
-                payload["embedding_model"] = embedding_model
-            if enrich_model:
-                payload["enrich_model"] = enrich_model
-            if overview_model:
-                payload["overview_model_name"] = overview_model
-                
-            rag_resp = requests.post(rag_api_url, json=payload)
-            if rag_resp.status_code==200:
-                meta_updates = {
-                    "chunk_size": chunk_size,
-                    "chunk_overlap": chunk_overlap,
-                    "retrieval_mode": retrieval_mode,
-                    "window_size": window_size,
-                    "enable_enrich": enable_enrich,
-                    "latechunk": latechunk,
-                    "docling_chunk": docling_chunk,
-                }
-                if embedding_model:
-                    meta_updates["embedding_model"] = embedding_model
-                if enrich_model:
-                    meta_updates["enrich_model"] = enrich_model
-                if overview_model:
-                    meta_updates["overview_model"] = overview_model
-                try:
-                    db.update_index_metadata(index_id, meta_updates)
-                except Exception as e:
-                    print(f" Failed to update index metadata: {e}")
+                "batch_size_enrich": batch_size_enrich,
+                **({"embedding_model": embedding_model} if embedding_model else {}),
+                **({"enrich_model": enrich_model} if enrich_model else {}),
+                **({"overview_model": overview_model} if overview_model else {}),
+            })
 
-                self.send_json_response({
-                    "response": rag_resp.json(),
-                    **meta_updates
-                })
-            else:
-                # Gracefully handle scenario where table already exists (idempotent build)
-                try:
-                    err_json = rag_resp.json()
-                except Exception:
-                    err_json = {}
-                err_text = err_json.get('error') if isinstance(err_json, dict) else rag_resp.text
-                if err_text and 'already exists' in err_text:
-                    # Treat as non-fatal; return message indicating index previously built
-                    self.send_json_response({
-                        "message": "Index already built  skipping rebuild.",
-                        "note": err_text
-                })
-                else:
-                    self.send_json_response({"error":f"RAG indexing failed: {rag_resp.text}"}, status_code=500)
+            worker = threading.Thread(
+                target=_run_index_build_job,
+                args=(
+                    index_id,
+                    file_paths,
+                    table_name,
+                    {
+                        "latechunk": latechunk,
+                        "docling_chunk": docling_chunk,
+                        "chunk_size": chunk_size,
+                        "chunk_overlap": chunk_overlap,
+                        "retrieval_mode": retrieval_mode,
+                        "window_size": window_size,
+                        "enable_enrich": enable_enrich,
+                        "embedding_model": embedding_model,
+                        "enrich_model": enrich_model,
+                        "overview_model": overview_model,
+                        "batch_size_embed": batch_size_embed,
+                        "batch_size_enrich": batch_size_enrich,
+                        "request_id": getattr(self, "request_id", _resolve_request_id(None)),
+                        "completed_files": completed_files,
+                        "failed_files": failed_files,
+                    },
+                ),
+                daemon=True,
+                name=f"index-build-{index_id[:8]}",
+            )
+            worker.start()
+
+            self.send_json_response({
+                "message": "Index build started.",
+                "index_id": index_id,
+                "status": "building",
+                "pending_files": len(pending_paths),
+                "completed_files": len(completed_files),
+            }, status_code=202)
         except Exception as e:
+            with _INDEX_BUILD_LOCK:
+                _ACTIVE_INDEX_BUILDS.discard(index_id)
             self.send_json_response({'error':str(e)}, status_code=500)
     
     def handle_link_index_to_session(self, session_id: str, index_id: str):
@@ -1059,7 +1551,31 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
     def send_json_response(self, data, status_code: int = 200):
         """Send a JSON (UTF-8) response with CORS headers. Safe against client disconnects."""
         try:
+            response_data = data
+            if status_code >= 400:
+                if isinstance(data, dict):
+                    error_message = data.get("error")
+                    if isinstance(error_message, dict):
+                        error_message = error_message.get("message", "Request failed")
+                    elif error_message is None:
+                        error_message = data.get("message", "Request failed")
+
+                    response_data = {
+                        "success": False,
+                        "error": str(error_message),
+                        "error_code": data.get("error_code") or self._default_error_code(status_code),
+                    }
+                    if "details" in data:
+                        response_data["details"] = data["details"]
+                else:
+                    response_data = {
+                        "success": False,
+                        "error": "Request failed",
+                        "error_code": self._default_error_code(status_code),
+                    }
+
             self.send_response(status_code)
+            self.send_header('X-Request-ID', str(getattr(self, "request_id", _resolve_request_id(None))))
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -1067,21 +1583,79 @@ Respond with exactly one word: USE_RAG or DIRECT_LLM"""
             self.send_header('Access-Control-Allow-Credentials', 'true')
             self.end_headers()
         
-            response_bytes = json.dumps(data, indent=2).encode('utf-8')
+            response_bytes = json.dumps(response_data, indent=2).encode('utf-8')
             self.wfile.write(response_bytes)
+            duration_ms = int((time.time() - getattr(self, "request_started_at", time.time())) * 1000)
+            LOGGER.info(
+                "request_finished request_id=%s method=%s path=%s status=%s duration_ms=%s",
+                getattr(self, "request_id", "n/a"),
+                getattr(self, "command", "unknown"),
+                self.path,
+                status_code,
+                duration_ms,
+            )
+            path = urlparse(self.path).path
+            BACKEND_METRICS.record_request(
+                method=getattr(self, "command", "UNKNOWN"),
+                path=path,
+                status_code=status_code,
+                duration_ms=duration_ms,
+            )
         except BrokenPipeError:
             # Client disconnected before we could finish sending
-            print("  Client disconnected during response  ignoring.")
+            LOGGER.warning("Client disconnected during response request_id=%s", getattr(self, "request_id", "n/a"))
         except Exception as e:
-            print(f" Error sending response: {e}")
+            LOGGER.error("Error sending response request_id=%s error=%s", getattr(self, "request_id", "n/a"), e)
+
+    def _backend_ready(self) -> bool:
+        try:
+            stats = db.get_stats()
+            if not isinstance(stats, dict):
+                return False
+            return self.ollama_client.is_ollama_running()
+        except Exception:
+            return False
+
+    def send_error_response(self, message: str, status_code: int = 400, error_code=None, details=None):
+        payload = {
+            "error": message,
+            "error_code": error_code or self._default_error_code(status_code),
+        }
+        if details is not None:
+            payload["details"] = details
+        self.send_json_response(payload, status_code=status_code)
+
+    def _default_error_code(self, status_code: int) -> str:
+        if status_code == 400:
+            return "bad_request"
+        if status_code == 401:
+            return "unauthorized"
+        if status_code == 403:
+            return "forbidden"
+        if status_code == 404:
+            return "not_found"
+        if status_code == 409:
+            return "conflict"
+        if status_code >= 500:
+            return "internal_error"
+        return "request_error"
     
     def log_message(self, format, *args):
         """Custom log format"""
-        print(f"[{self.date_time_string()}] {format % args}")
+        LOGGER.info(
+            "http_access request_id=%s client=%s message=%s",
+            getattr(self, "request_id", "n/a"),
+            getattr(self, "client_address", ("unknown",))[0],
+            format % args,
+        )
 
 def main():
     """Main function to initialize and start the server"""
-    PORT = 8000  #  Define port
+    try:
+        PORT = int(os.getenv("BACKEND_PORT", "8000"))
+    except ValueError:
+        print(" Invalid BACKEND_PORT value, falling back to 8000")
+        PORT = 8000
     try:
         # Initialize the database
         print(" Database initialized successfully")

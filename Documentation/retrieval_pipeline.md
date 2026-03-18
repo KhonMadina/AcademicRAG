@@ -9,7 +9,7 @@ Given a **user query** and one or more indexed tables, retrieve the most relevan
 | Stage | Module | Key Classes / Fns | Notes |
 |-------|--------|-------------------|-------|
 | Query Pre-processing | `retrieval/query_transformer.py` | `QueryTransformer`, `HyDEGenerator`, `GraphQueryTranslator` | Expands, rewrites, or translates the raw query. |
-| Retrieval | `retrieval/retrievers.py` | `BM25Retriever`, `DenseRetriever`, `HybridRetriever` | Abstract over LanceDB vector + FTS search. |
+| Retrieval | `retrieval/retrievers.py` | `MultiVectorRetriever`, `GraphRetriever` | Hybrid LanceDB retrieval (FTS + vector) and optional graph expansion. |
 | Reranking | `rerankers/reranker.py` | `ColBERTSmall`, fallback `bge-reranker` | Optionally improves result ordering. |
 | Synthesis | `pipelines/retrieval_pipeline.py` | `_synthesize_final_answer()` | Calls LLM with evidence snippets. |
 
@@ -20,7 +20,7 @@ flowchart LR
     Q["User Query"] --> XT["Query Transformer"]
     XT -->|variants| RETRIEVE
     subgraph Retrieval
-        RET_BM25[BM25] --> MERGE
+        RET_BM25[FTS / Keyword] --> MERGE
         RET_DENSE[Dense Vector] --> MERGE
         style RET_BM25 fill:#444,stroke:#ccc,color:#fff
         style RET_DENSE fill:#444,stroke:#ccc,color:#fff
@@ -33,7 +33,7 @@ flowchart LR
 
 ### Narrative
 1. **Query Transformer** may expand the query (keyword list, HyDE doc, KG translation) depending on `searchType`.
-2. **Retrievers** execute BM25 and/or dense similarity against LanceDB.  Combination controlled by `retrievalMode` and `denseWeight`.
+2. **Retrievers** execute LanceDB full-text search (FTS) and/or dense similarity. Combination is controlled by `searchType` and `denseWeight`.
 3. **Reranker** (if `aiRerank=true` or hybrid search) scores snippets; top `rerankerTopK` chosen.
 4. **Synthesiser** streams an LLM completion using the prompt described in `prompt_inventory.md` (`retrieval_pipeline.synth_final`).
 
@@ -103,20 +103,18 @@ self.dense_retriever = MultiVectorRetriever(
 3. Cosine similarity scoring
 4. Returns top-K with metadata
 
-#### 2. BM25 Full-Text Search (`_get_bm25_retriever()`)
+#### 2. LanceDB Full-Text Search (FTS)
 ```python
-# Uses SQLite FTS5 under the hood
-SELECT chunk_id, text, bm25(fts_table) as score 
-FROM fts_table 
-WHERE fts_table MATCH ? 
-ORDER BY bm25(fts_table) 
-LIMIT ?
+fts_df = (
+    tbl.search(query=fts_query, query_type="fts")
+       .limit(candidate_k)
+       .to_df()
+)
 ```
 
-**Token Processing**:
-- Stemming via Porter algorithm
-- Stop-word removal
-- N-gram tokenization (configurable)
+**Notes**:
+- FTS is executed inside `MultiVectorRetriever.retrieve(...)`.
+- Standalone lexical retriever initialization is deprecated and no longer instantiated.
 
 #### 3. Hybrid Score Fusion
 When both retrievers are enabled:
@@ -201,7 +199,7 @@ ORIGINAL QUESTION: "{query}"
 
     response = self.llm_client.complete_stream(
         prompt=prompt,
-        model=self.ollama_config["generation_model"]  # gemma3:12b-cloud
+        model=self.ollama_config["generation_model"]  # gemini-3-flash-preview:cloud
     )
     
     for chunk in response:
@@ -236,7 +234,7 @@ class QueryDecomposer:
         
         response = self.llm_client.complete(
             prompt=decomposition_prompt,
-            model=self.enrichment_model  # gemma3:4b-cloud for speed
+            model=self.enrichment_model  # gemma3:12b-cloud for speed
         )
         
         # Parse response into list of sub-queries
@@ -446,8 +444,8 @@ def recover_from_embedding_failure(self, query: str, **kwargs):
     except Exception as e:
         print(f" Recovery failed: {e}")
     
-    # Fallback to BM25-only search
-    kwargs["search_type"] = "bm25"
+    # Fallback to keyword-only search
+    kwargs["search_type"] = "fts"
     kwargs["ai_rerank"] = False
     print(" Falling back to keyword search only")
     
@@ -553,7 +551,7 @@ RETRIEVAL_CONFIG = {
 MODEL_CONFIG = {
     "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
     "generation_model": "gemma3:12b-cloud",
-    "enrichment_model": "gemma3:4b-cloud",
+    "enrichment_model": "gemma3:12b-cloud",
     "reranker_model": "answerdotai/answerai-colbert-small-v1",
     "fallback_reranker": "BAAI/bge-reranker-base"
 }

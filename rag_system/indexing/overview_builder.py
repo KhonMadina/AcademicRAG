@@ -18,7 +18,7 @@ class OverviewBuilder:
         "DOCUMENT_START:\n{text}\n\nOVERVIEW:"
     )
 
-    def __init__(self, llm_client, model: str = "gemma3:4b-cloud", first_n_chunks: int = 5,
+    def __init__(self, llm_client, model: str = "gemma3:12b-cloud", first_n_chunks: int = 5,
                  out_path: str | None = None):
         if out_path is None:
             out_path = "index_store/overviews/overviews.jsonl"

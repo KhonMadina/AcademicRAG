@@ -11,8 +11,8 @@
     "enable_enrich": true,
     "enable_latechunk": true,
     "enable_docling": true,
-    "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
-    "generation_model": "gemma3:4b-cloud",
+    "embedding_model": "nomic-embed-text:v1.5",
+    "generation_model": "gemma3:12b-cloud",
     "retrieval_mode": "hybrid",
     "window_size": 2
   }

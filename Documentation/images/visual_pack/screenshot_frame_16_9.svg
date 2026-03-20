@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-label="Screenshot frame 16 by 9">
+  <defs>
+    <linearGradient id="frame" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="#ffffff"/>
+  <rect x="140" y="90" width="1640" height="900" rx="28" fill="url(#frame)"/>
+  <rect x="170" y="150" width="1580" height="810" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="3"/>
+  <circle cx="210" cy="120" r="8" fill="#ef4444"/>
+  <circle cx="238" cy="120" r="8" fill="#f59e0b"/>
+  <circle cx="266" cy="120" r="8" fill="#22c55e"/>
+  <text x="320" y="126" fill="#cbd5e1" font-family="Verdana, sans-serif" font-size="20">AcademicRAG Demo Screenshot</text>
+  <text x="820" y="565" fill="#94a3b8" font-family="Verdana, sans-serif" font-size="34">Place your UI screenshot here</text>
+</svg>

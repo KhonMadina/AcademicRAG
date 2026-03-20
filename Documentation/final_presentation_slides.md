@@ -1,7 +1,7 @@
 # Final Project Presentation Slides
 
 ## Slide 1 - Title Slide
-**AcademicRAG: A Privacy-Preserving Local Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering**
+**AcademicRAG: A Cloud-Enabled Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering**
 
 - Master of Information Technology in Education
 - Candidate: [Your Name]
@@ -10,7 +10,7 @@
 - March 2026
 
 **Speaker note:**
-Introduce the project as a local AI-powered document intelligence platform designed for academic and institutional use.
+Introduce the project as a cloud-enabled, privacy-aware document intelligence platform designed for academic and institutional use.
 
 ---
 
@@ -33,7 +33,7 @@ Emphasize the practical problem: information exists, but finding and synthesizin
 - Traditional keyword search is limited for complex questions
 - Generic AI chatbots may hallucinate or lack document grounding
 - Many solutions require uploading sensitive documents to external servers
-- There is a need for a local, privacy-preserving system that can answer questions from institutional documents reliably
+- There is a need for a privacy-aware, cloud-enabled system that can answer questions from institutional documents reliably
 
 **Speaker note:**
 State the project problem clearly and link it to privacy, usability, and answer quality.
@@ -43,12 +43,12 @@ State the project problem clearly and link it to privacy, usability, and answer 
 ## Slide 4 - Aim and Objectives
 **Aim**
 
-To design and implement a local document intelligence platform for secure question answering over academic documents.
+To design and implement a cloud-enabled document intelligence platform for secure question answering over academic documents.
 
 **Objectives**
 
-- Analyse requirements for privacy-preserving academic document QA
-- Design a modular local architecture
+- Analyse requirements for privacy-aware academic document QA
+- Design a modular cloud-integrated architecture
 - Implement document upload, indexing, retrieval, and chat
 - Improve baseline RAG with routing, hybrid retrieval, reranking, and verification
 - Evaluate the prototype using functional and technical evidence
@@ -61,9 +61,9 @@ Keep this slide concise. Show that the work is a systems-development project wit
 ## Slide 5 - Proposed Solution
 **AcademicRAG**
 
-- A fully local Retrieval-Augmented Generation platform
+- A cloud-enabled Retrieval-Augmented Generation platform
 - Supports document upload, indexing, and natural-language querying
-- Keeps document processing and model inference on local infrastructure
+- Keeps document indexing and storage under institutional control while using managed cloud inference
 - Designed for academic, administrative, and research document collections
 
 **Key idea:**
@@ -80,7 +80,7 @@ Present AcademicRAG as the direct response to the problem identified earlier.
 - **Frontend:** Next.js, React, TypeScript
 - **Backend:** Python HTTP server for sessions, uploads, and routing
 - **RAG API:** Python retrieval and indexing service
-- **Model Server:** Ollama for local LLM inference
+- **Model Server:** Ollama Cloud for managed LLM inference
 
 **Storage**
 
@@ -89,7 +89,7 @@ Present AcademicRAG as the direct response to the problem identified earlier.
 - Local filesystem for uploaded files and index artifacts
 
 **Suggested visual:**
-Browser -> Frontend -> Backend -> RAG API -> Ollama  
+Browser -> Frontend -> Backend -> RAG API -> Ollama Cloud  
 with SQLite and LanceDB shown below
 
 **Speaker note:**
@@ -142,7 +142,7 @@ This is the core technical contribution slide. Show that the platform uses multi
 - Dual-layer routing between direct LLM and RAG
 - Hybrid retrieval: semantic + lexical search
 - Contextual enrichment during indexing
-- Late chunk expansion for local context preservation
+- Late chunk expansion for contextual preservation
 - AI reranking using ColBERT-style reranker
 - Optional answer verification with confidence scoring
 - Session-aware history and semantic caching
@@ -163,7 +163,7 @@ This slide helps demonstrate originality and technical depth.
 **Backend / AI stack**
 
 - Python
-- Ollama
+- Ollama Cloud
 - Transformers
 - Sentence Transformers
 - Docling
@@ -178,7 +178,7 @@ This slide helps demonstrate originality and technical depth.
 - `answerdotai/answerai-colbert-small-v1` for reranking
 
 **Speaker note:**
-Mention that the project relies on open-source components and is designed for local deployment.
+Mention that the project relies on open-source components and is designed for privacy-aware cloud integration.
 
 ---
 
@@ -189,6 +189,12 @@ Mention that the project relies on open-source components and is designed for lo
 - Supports sessions, indexing, uploads, and document-grounded chat
 - Includes health checks and backend test scripts
 - Frontend supports typed API integration and streaming interaction
+
+**System screenshot**
+
+[Insert system screenshot here]
+
+*Add your latest UI screenshot during final slide preparation.*
 
 **Reported engineering performance**
 
@@ -228,7 +234,7 @@ Connect the technical system back to the degree field: Information Technology in
 - No formal user study yet
 - No labelled benchmark dataset for retrieval metrics
 - Some advanced features remain experimental
-- Performance depends on local hardware and model configuration
+- Performance depends on infrastructure, network conditions, and model configuration
 - Production maturity is strongest for PDF-based workflows
 
 **Speaker note:**
@@ -255,9 +261,9 @@ Show that the project has a clear continuation path and research value beyond th
 ## Slide 15 - Conclusion
 **Conclusion**
 
-- AcademicRAG addresses the need for private, local, document-grounded AI in education
+- AcademicRAG addresses the need for private, document-grounded AI in education with controlled cloud inference
 - The system successfully integrates indexing, retrieval, routing, reranking, and verification
-- It demonstrates that secure local AI deployment is feasible and useful for academic institutions
+- It demonstrates that secure, cloud-enabled AI deployment is feasible and useful for academic institutions
 - The project provides a strong foundation for future research and institutional adoption
 
 **Speaker note:**
@@ -280,7 +286,7 @@ Pause here and prepare to answer likely questions on privacy, evaluation, archit
 
 ## Suggested Viva Questions to Prepare
 
-1. Why did you choose a local deployment instead of cloud AI?
+1. Why did you choose a controlled cloud-integration approach instead of fully local deployment?
 2. What makes your system better than a simple chatbot over PDFs?
 3. Why did you use hybrid retrieval instead of only embeddings?
 4. How does the routing mechanism improve performance?
@@ -298,3 +304,32 @@ Pause here and prepare to answer likely questions on privacy, evaluation, archit
 - Use screenshots of the UI on the results slide if available
 - Keep total presentation length around 10-15 minutes
 - Prepare a shorter 2-minute summary in case time is limited
+
+---
+
+## Ready-to-Use Local Image Assets
+
+Use these generated files from `Documentation/images/`:
+
+- `system_architecture.mmd` for Slide 6 and Chapter 3.3
+- `indexing_pipeline.mmd` for Slide 7 and Chapter 3.5
+- `retrieval_workflow.mmd` for Slide 8 and Chapter 3.6
+- `results_latency_chart.mmd` for Slide 11 and Chapter 4.3
+- `evaluation_framework.mmd` for Slide 13/14 and Chapter 3.8/4.x
+
+See `Documentation/images/image_pack_guide.md` for mapping and export steps.
+
+---
+
+## Polished Non-Diagram Visual Assets
+
+Use these SVG visuals from `Documentation/images/visual_pack/`:
+
+- `cover_hero.svg` for Slide 1 background
+- `icon_privacy_governance.svg` for Slides 2 and 12
+- `icon_hybrid_retrieval.svg` for Slide 9
+- `icon_evaluation.svg` for Slides 11 and 13
+- `screenshot_frame_16_9.svg` for Slide 11 UI screenshot layout
+- `section_divider_wave.svg` for section transitions
+
+See `Documentation/images/visual_pack/visual_pack_guide.md` for details.

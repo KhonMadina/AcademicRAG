@@ -1,0 +1,11 @@
+flowchart LR
+    E1[Functional Completeness\nFeatures Endpoints Flows]
+    E2[Operational Reliability\nHealth Readiness Metrics]
+    E3[Retrieval Quality\nRecall MRR Citation Hit]
+
+    E1 --> FINAL[Thesis Evaluation Evidence]
+    E2 --> FINAL
+    E3 --> FINAL
+
+    classDef block fill:#f3f0ff,stroke:#5b4bb7,stroke-width:1.2px,color:#221b57;
+    class E1,E2,E3,FINAL block;

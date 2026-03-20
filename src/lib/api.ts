@@ -923,49 +923,65 @@ class ChatAPI {
     if (typeof forceRag === 'boolean') payload.force_rag = forceRag;
     if (typeof provencePrune === 'boolean') payload.provence_prune = provencePrune;
 
-    const resp = await fetch('http://localhost:8001/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    try {
+      const resp = await fetch('http://localhost:8001/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-    if (!resp.ok || !resp.body) {
-      if (!resp.ok) {
-        throw await this.createApiError(resp, 'stream', 'Stream request failed');
+      if (!resp.ok || !resp.body) {
+        if (!resp.ok) {
+          throw await this.createApiError(resp, 'stream', 'Stream request failed');
+        }
+        throw this.toApiError(new Error(`Missing stream body: ${resp.status}`), 'stream', 'Stream request failed');
       }
-      throw this.toApiError(new Error(`Missing stream body: ${resp.status}`), 'stream', 'Stream request failed');
-    }
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-    let streamClosed = false;
-    while (!streamClosed) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      let streamClosed = false;
+      let receivedComplete = false;
+      while (!streamClosed) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
 
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith('data:')) continue;
-        const jsonStr = line.replace(/^data:\s*/, '');
-        try {
-          const evt = JSON.parse(jsonStr) as StreamEvent;
-          onEvent(evt);
-          if (evt.type === 'complete') {
-            // Gracefully close the stream so the caller unblocks
-            try { await reader.cancel(); } catch {}
-            streamClosed = true;
-            break;
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          const jsonStr = line.replace(/^data:\s*/, '');
+          try {
+            const evt = JSON.parse(jsonStr) as StreamEvent;
+            onEvent(evt);
+
+            if (evt.type === 'error') {
+              const rawError = typeof evt.data?.error === 'string' ? evt.data.error : 'Streaming failed';
+              throw this.toApiError(new Error(rawError), 'stream', 'Stream request failed');
+            }
+
+            if (evt.type === 'complete') {
+              receivedComplete = true;
+              // Gracefully close the stream so the caller unblocks
+              try { await reader.cancel(); } catch {}
+              streamClosed = true;
+              break;
+            }
+          } catch (error) {
+            throw this.toApiError(error, 'stream', 'Stream request failed');
           }
-        } catch {
-          /* noop */
         }
       }
+
+      if (!receivedComplete) {
+        throw this.toApiError(new Error('Stream ended before completion event'), 'stream', 'Stream request failed');
+      }
+    } catch (error) {
+      throw this.toApiError(error, 'stream', 'Stream request failed');
     }
   }
 }

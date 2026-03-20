@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="220" viewBox="0 0 1920 220" role="img" aria-label="Section divider wave">
+  <rect width="1920" height="220" fill="#ffffff"/>
+  <path d="M0 120 C 260 40, 520 200, 780 120 C 1040 40, 1300 200, 1560 120 C 1700 78, 1810 86, 1920 110 L1920 220 L0 220 Z" fill="#dbeafe"/>
+  <path d="M0 150 C 240 90, 540 220, 840 150 C 1140 80, 1440 220, 1920 145 L1920 220 L0 220 Z" fill="#bfdbfe" opacity="0.8"/>
+</svg>

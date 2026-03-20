@@ -15,6 +15,7 @@ interface QuickChatProps {
 export function QuickChat({ sessionId: externalSessionId, onSessionChange, className="" }: QuickChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(externalSessionId);
   const [generationModels, setGenerationModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -57,6 +58,7 @@ export function QuickChat({ sessionId: externalSessionId, onSessionChange, class
 
   const sendMessage = async (content: string, _files?: unknown) => {
     if (!content.trim()) return;
+    setError(null);
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -96,6 +98,17 @@ export function QuickChat({ sessionId: externalSessionId, onSessionChange, class
     setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       console.error('Quick chat failed', err);
+      const actionable = api.getActionableErrorMessage(err, 'chat');
+      setError(actionable);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          content: actionable,
+          sender: 'assistant',
+          timestamp: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setIsLoading(false);
     }
@@ -110,6 +123,11 @@ export function QuickChat({ sessionId: externalSessionId, onSessionChange, class
 
   return (
     <div className={`flex flex-col h-full ${className}`}>
+      {error && (
+        <div className="bg-red-800/80 text-red-200 px-4 py-2 text-sm flex-shrink-0">
+          {error}
+        </div>
+      )}
       {showEmptyState ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-6">
           <div className="text-center text-2xl font-semibold select-none">What can I help you find today?</div>

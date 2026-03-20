@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Privacy and governance icon">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1d4ed8"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="60" fill="#f8fafc"/>
+  <rect x="86" y="94" width="340" height="324" rx="28" fill="#ffffff" stroke="#cbd5e1" stroke-width="8"/>
+  <path d="M256 130 L352 172 V248 C352 318 309 371 256 392 C203 371 160 318 160 248 V172 Z" fill="url(#g1)" opacity="0.9"/>
+  <rect x="222" y="220" width="68" height="96" rx="12" fill="#ffffff"/>
+  <rect x="208" y="186" width="96" height="56" rx="28" fill="none" stroke="#ffffff" stroke-width="14"/>
+</svg>

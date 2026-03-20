@@ -544,6 +544,14 @@ Respond with JSON: {{"category": "<your_choice>"}}
 
                     if compose_from_sub_answers:
                         print("\n--- Composing final answer from sub-answers ---")
+                        max_compose_chars = max(3000, int(os.getenv("RAG_COMPOSE_MAX_CONTEXT_CHARS", "24000")))
+                        serialized_sub_answers = json.dumps(sub_answers, indent=2)
+                        if len(serialized_sub_answers) > max_compose_chars:
+                            serialized_sub_answers = (
+                                serialized_sub_answers[:max_compose_chars]
+                                + "\n\n[Additional sub-answer context omitted due to context budget.]"
+                            )
+
                         compose_prompt = f"""
 You are an expert answer composer for a Retrieval-Augmented Generation (RAG) system.
 
@@ -565,7 +573,7 @@ ORIGINAL QUESTION:
 "{contextual_query}"
 
 SUB-ANSWERS (JSON):
-{json.dumps(sub_answers, indent=2)}
+{serialized_sub_answers}
 
 ------
 FINAL ANSWER:

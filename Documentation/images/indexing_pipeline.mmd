@@ -1,0 +1,16 @@
+flowchart TD
+    A[1. Upload Documents] --> B[2. Convert and Extract Text]
+    B --> C{Large PDF?}
+    C -->|Yes| D[Apply Memory Guard\nand Fallback Extraction]
+    C -->|No| E[Standard Extraction]
+    D --> F[3. Chunk Documents]
+    E --> F
+    F --> G[4. Optional Contextual Enrichment]
+    G --> H[5. Generate Embeddings]
+    H --> I[6. Store Vectors in LanceDB]
+    I --> J[7. Save Metadata in SQLite]
+
+    classDef step fill:#eef8ef,stroke:#2d7d46,stroke-width:1.2px,color:#123;
+    classDef decision fill:#fff5e6,stroke:#b26a00,stroke-width:1.2px,color:#333;
+    class A,B,D,E,F,G,H,I,J step;
+    class C decision;

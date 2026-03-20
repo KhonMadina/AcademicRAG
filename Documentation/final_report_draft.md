@@ -1,7 +1,7 @@
 # ROYAL UNIVERSITY OF PHNOM PENH
 ## Master of Information Technology in Education
 
-# AcademicRAG: A Privacy-Preserving Local Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering
+# AcademicRAG: A Cloud-Enabled Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering
 
 **A Final Project Report Draft**  
 In Partial Fulfilment of the Requirements for the Degree of  
@@ -20,7 +20,7 @@ This section should be formatted according to the university template and signed
 
 **Programme:** Master of Information Technology in Education  
 **Candidate:** [Your Name]  
-**Title of Report:** *AcademicRAG: A Privacy-Preserving Local Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering*  
+**Title of Report:** *AcademicRAG: A Cloud-Enabled Document Intelligence Platform for Academic Knowledge Retrieval and Question Answering*  
 
 This is to certify that the work presented in this report was completed under my supervision and that, to the best of my knowledge, it is suitable for submission in partial fulfilment of the degree requirements.
 
@@ -48,15 +48,15 @@ I would like to express my sincere gratitude to my supervisor for guidance, enco
 
 ## Abstract
 
-This project presents **AcademicRAG**, a privacy-preserving document intelligence platform designed to support secure question answering and knowledge retrieval over local academic and institutional documents. The motivation for the project arises from a practical problem faced by schools, universities, and education-related offices: important knowledge is often distributed across reports, policy documents, course materials, manuals, and research papers, yet many available artificial intelligence tools require data to be uploaded to external cloud services. This creates privacy, governance, and trust concerns, especially when documents contain internal academic records, assessment materials, or administrative information.
+This report presents **AcademicRAG**, a cloud-enabled and privacy-aware document intelligence platform for question answering over academic and institutional documents. The project addresses a practical challenge faced by universities and education-related organisations: critical knowledge is distributed across reports, policies, manuals, and research papers, while conventional search is limited and many external AI services raise governance and confidentiality concerns.
 
-To address this problem, the project implements a fully local Retrieval-Augmented Generation (RAG) system that combines a modern web interface, a Python backend, a dedicated RAG API layer, local large language model inference through Ollama, SQLite for metadata persistence, and LanceDB for vector storage. The system extends a basic RAG design through several additional mechanisms: dual-layer routing between direct large language model answering and document-grounded retrieval, hybrid retrieval that combines lexical and dense search, contextual enrichment during indexing, late chunk expansion for improved local context, AI reranking, optional answer verification, session-aware chat history, and operational safeguards for large PDF processing.
+To address this challenge, the project implements a Retrieval-Augmented Generation (RAG) system that combines a modern web interface, a Python backend gateway, a dedicated RAG API layer, inference through Ollama Cloud, SQLite metadata persistence, and LanceDB vector storage. Beyond a baseline RAG workflow, the platform incorporates dual-layer routing, hybrid dense-lexical retrieval, contextual enrichment, late chunk expansion, AI reranking, optional verification, session-aware interaction, and safeguards for large-PDF indexing.
 
-The methodology followed a design-and-development approach appropriate for an applied information technology project. Project files, architecture documents, configuration files, and implementation code were analysed to identify system requirements, component interactions, and technical design decisions. The completed prototype demonstrates end-to-end capabilities for document upload, indexing, session management, retrieval-based question answering, and frontend streaming interaction. Reported engineering benchmarks in the project documentation indicate simple direct-chat responses in approximately 1-3 seconds, document-grounded responses in 5-15 seconds, more complex analysis in 15-30 seconds, and indexing times of approximately 2-5 minutes per 100 MB depending on configuration.
+The study follows a design-and-development methodology appropriate for applied information technology research. Evaluation is based on implementation artifacts, functional testing, operational dry-run evidence, and documented benchmark ranges. The completed prototype demonstrates end-to-end capability for upload, indexing, retrieval-grounded chat, and streaming responses. Reported engineering ranges indicate approximately 1-3 seconds for simple direct chat, 5-15 seconds for document-grounded responses, 15-30 seconds for complex analysis, and 2-5 minutes per 100 MB for indexing, depending on configuration.
 
-The project contributes a practical model for local AI deployment in education by showing how privacy, usability, and retrieval quality can be balanced in a modular architecture. Its main strengths are data sovereignty, extensibility, and the use of routing, reranking, and verification to improve reliability. Its current limitations include the absence of a formal user study, limited published retrieval-quality metrics, and partial features that remain experimental, such as graph-based and fully multimodal retrieval. Overall, the project demonstrates that a locally deployed document intelligence system can serve as a strong foundation for secure academic knowledge support in educational settings.
+The project contributes a practical model for governed AI deployment in education by balancing privacy, usability, and retrieval quality in a modular architecture. Current limitations include the absence of a controlled user study, incomplete retrieval-quality benchmarking, and partially experimental advanced features (for example, graph-based and fully multimodal retrieval). Overall, AcademicRAG provides a credible foundation for secure academic knowledge support in the RUPP and broader Cambodian context.
 
-**Keywords:** Retrieval-Augmented Generation, local AI, document intelligence, educational technology, privacy-preserving systems, hybrid retrieval, academic knowledge management.
+**Keywords:** Retrieval-Augmented Generation, cloud-enabled AI, document intelligence, educational technology, privacy-aware systems, hybrid retrieval, academic knowledge management.
 
 ---
 
@@ -74,46 +74,46 @@ The rapid growth of digital content in education has created a knowledge managem
 
 Recent progress in large language models has created new opportunities for question answering over document collections. Retrieval-Augmented Generation (RAG) has emerged as an important approach because it combines document retrieval with language generation, allowing the system to answer user questions using relevant evidence rather than relying only on model memory. This makes RAG particularly attractive for educational settings, where answers should be grounded in institutional documents and where transparency is important.
 
-However, educational organisations also face serious privacy and governance constraints. Many cloud-based AI tools require documents to be uploaded to remote servers. For institutions handling internal reports, student-related records, curriculum drafts, assessment material, or unpublished research, this creates risks related to data leakage, confidentiality, and compliance. As a result, there is a strong need for local AI systems that can process sensitive documents without external data transfer.
+However, educational organisations also face serious privacy and governance constraints. Many cloud-based AI tools require documents to be uploaded to remote servers without sufficient institutional control. For institutions handling internal reports, student-related records, curriculum drafts, assessment material, or unpublished research, this creates risks related to data leakage, confidentiality, and compliance. As a result, there is a strong need for privacy-aware AI systems that can enforce controlled data handling while still benefiting from modern cloud inference.
 
-AcademicRAG was developed in response to this need. The project is a local document intelligence platform designed to ingest private documents, index them, and support natural-language question answering through a browser-based interface. The repository and documentation describe it as a sovereign, on-premise platform for secure knowledge extraction, with all major processing performed locally. The system integrates modern web technologies with open-source AI tooling and adds several enhancements beyond a simple RAG baseline, including routing, hybrid retrieval, reranking, contextual enrichment, and answer verification.
+AcademicRAG was developed in response to this need. The project is a cloud-enabled document intelligence platform designed to ingest private documents, index them, and support natural-language question answering through a browser-based interface. The system integrates modern web technologies with open-source AI tooling and managed cloud inference through Ollama Cloud, while preserving strong governance through controlled indexing, storage, and retrieval workflows. It also adds several enhancements beyond a simple RAG baseline, including routing, hybrid retrieval, reranking, contextual enrichment, and answer verification.
 
 From an educational technology perspective, this project is relevant because it addresses a real operational problem: how to make institutional knowledge more accessible while preserving privacy. It also demonstrates how modern AI systems can be adapted to the realities of educational infrastructure, where budgets, bandwidth, data policies, and local deployment constraints matter.
 
 ## 1.2 Problem Statement
 
-Educational institutions increasingly depend on large collections of digital documents, yet these materials are difficult to search, synthesize, and reuse efficiently. Traditional keyword search often fails when users ask conceptual questions, while generic cloud-based AI assistants may provide unsupported answers or require sensitive data to be uploaded externally. There is therefore a gap between the need for intelligent document access and the need for privacy, control, and evidence-based responses.
+Educational institutions increasingly depend on large collections of digital documents, yet these materials are difficult to search, synthesise, and reuse efficiently. Traditional keyword search often fails when users ask conceptual questions, while generic cloud-based AI assistants may provide unsupported answers or require sensitive data to be uploaded externally. There is therefore a gap between the need for intelligent document access and the need for privacy, control, and evidence-based responses.
 
 A conventional document chatbot is also insufficient for this context. Simple systems frequently rely on a single retrieval method, do not distinguish between questions that require retrieval and those that can be answered directly, and may return long but weakly grounded responses. In addition, educational and administrative documents vary considerably in structure and size, especially PDF reports, creating operational issues for indexing and retrieval.
 
-This project addresses the following core problem: **How can a local, privacy-preserving document intelligence platform be designed and implemented to support reliable question answering over academic and institutional documents while maintaining acceptable usability and technical performance?**
+This project addresses the following core problem: **How can a cloud-enabled, privacy-aware document intelligence platform be designed and implemented to support reliable question answering over academic and institutional documents while maintaining acceptable usability and technical performance?**
 
 ## 1.3 Aim and Objectives of the Study
 
 ### Aim
 
-The aim of this project is to design, implement, and evaluate a local document intelligence platform that enables secure, evidence-based question answering over private academic documents.
+The aim of this project is to design, implement, and evaluate a cloud-enabled document intelligence platform that enables secure, evidence-based question answering over private academic documents.
 
 ### Objectives
 
-1. To analyse the technical and practical requirements for a privacy-preserving academic document question answering system.
+1. To analyse the technical and practical requirements for a privacy-aware academic document question answering system.
 2. To design a modular architecture combining frontend interaction, backend session management, retrieval services, model serving, and persistent storage.
-3. To implement a local RAG pipeline capable of document upload, indexing, retrieval, and answer generation.
+3. To implement a cloud-enabled RAG pipeline capable of document upload, indexing, retrieval, and answer generation.
 4. To improve a baseline RAG approach through hybrid retrieval, dual-layer routing, contextual enrichment, late chunk expansion, reranking, and answer verification.
 5. To assess the completed prototype using engineering-oriented functional and performance evidence derived from the system implementation and project documentation.
 6. To discuss the relevance, strengths, limitations, and future potential of the system in educational settings.
 
 ## 1.4 Rationale of the Study
 
-The rationale for this study is both practical and academic. Practically, educational institutions need secure tools that can help staff and students interact with large document collections more efficiently. A local document intelligence platform can reduce time spent manually searching documents, improve access to institutional knowledge, and support evidence-based responses.
+The rationale for this study is both practical and academic. Practically, educational institutions need secure tools that can help staff and students interact with large document collections more efficiently. A cloud-enabled document intelligence platform can reduce time spent manually searching documents, improve access to institutional knowledge, and support evidence-based responses.
 
-Academically, the project provides a useful case study in applied educational technology and information systems design. It demonstrates how current AI techniques can be adapted for constrained environments where privacy and governance are central concerns. Rather than treating AI as a purely cloud-based service, the project explores a local deployment model that is more suitable for institutions with data sensitivity requirements.
+Academically, the project provides a useful case study in applied educational technology and information systems design. It demonstrates how current AI techniques can be adapted for environments where privacy and governance are central concerns. Rather than treating AI as an unrestricted cloud service, the project explores a controlled cloud-integration model that is more suitable for institutions with data sensitivity requirements.
 
 The study is also significant because it moves beyond a minimal RAG implementation. By integrating routing, hybrid retrieval, reranking, and verification, the project examines how system design choices can improve trustworthiness and usability. These are especially important in education, where incorrect or unsupported answers can have consequences for teaching, assessment, administration, and policy interpretation.
 
-## 1.5 Limitation and Scope
+## 1.5 Scope and Limitations
 
-The scope of the project is limited to the design and implementation of a working prototype for local document intelligence. The system covers document upload, indexing, session management, retrieval, response generation, and a browser-based user interface. It is intended primarily for private document collections and local deployment.
+The scope of the project is limited to the design and implementation of a working prototype for cloud-enabled document intelligence. The system covers document upload, indexing, session management, retrieval, response generation, and a browser-based user interface. It is intended primarily for private document collections with controlled cloud inference.
 
 The project has several limitations.
 
@@ -127,7 +127,7 @@ These limitations do not reduce the value of the project as a systems-developmen
 
 ## 1.6 Structure of the Study
 
-This report is organised into six chapters. Chapter 1 introduces the study, its problem, objectives, rationale, and scope. Chapter 2 reviews relevant literature and technical concepts related to RAG, hybrid retrieval, local AI deployment, and verification. Chapter 3 explains the research methodology and the technical design of the AcademicRAG platform. Chapter 4 presents the implementation outcomes, functional features, and reported performance results. Chapter 5 discusses the significance of the findings, project contributions, limitations, and future directions. Chapter 6 concludes the report and presents recommendations.
+This report is organised into six chapters. Chapter 1 introduces the study, its problem, objectives, rationale, and scope. Chapter 2 reviews relevant literature and technical concepts related to RAG, hybrid retrieval, cloud-integrated AI deployment, and verification. Chapter 3 explains the research methodology and the technical design of the AcademicRAG platform. Chapter 4 presents the implementation outcomes, functional features, and reported performance results. Chapter 5 discusses the significance of the findings, project contributions, limitations, and future directions. Chapter 6 concludes the report and presents recommendations.
 
 ---
 
@@ -173,17 +173,17 @@ AcademicRAG includes an optional verifier component that assesses whether an ans
 
 Verification is not a complete substitute for human judgement. It remains dependent on model behaviour and formatting reliability. However, as part of a broader architecture that already includes retrieval, reranking, and constrained prompting, it strengthens the platform's trustworthiness and makes it more appropriate for professional and academic use.
 
-## 2.6 Local AI Deployment and Privacy in Education
+## 2.6 Cloud-Integrated AI Deployment and Privacy in Education
 
-Educational institutions operate within ethical and administrative constraints that make privacy an essential requirement. Student information, internal evaluations, draft policies, and committee reports cannot always be shared with external AI platforms. A local deployment model addresses this issue by keeping processing on institutional hardware.
+Educational institutions operate within ethical and administrative constraints that make privacy an essential requirement. Student information, internal evaluations, draft policies, and committee reports cannot always be shared with external AI platforms without governance controls. A cloud-integrated deployment model can address this issue by combining managed inference with strict institutional controls over data preparation, retrieval scope, and access policy.
 
-AcademicRAG is explicitly designed around this principle. The project uses Ollama to serve local language models, SQLite for local metadata storage, LanceDB for local embeddings, and file-system-based storage for uploaded documents and auxiliary indexes. This design aligns with a privacy-preserving interpretation of educational technology: AI should support learning and administration without forcing institutions to surrender control of their data.
+AcademicRAG is explicitly designed around this principle. The project uses Ollama Cloud for language model inference, SQLite for metadata storage, LanceDB for embeddings, and file-system-based storage for uploaded documents and auxiliary indexes. This design aligns with a privacy-aware interpretation of educational technology: AI should support learning and administration while maintaining institutional control over document workflows and data governance.
 
 From a theoretical perspective, this also shifts the focus from raw model performance to deployment appropriateness. In education, the most useful system is not always the largest or most centralized one; it is often the system that can be deployed safely, maintained locally, and adapted to existing workflows.
 
 ## 2.7 Research Gap and Conceptual Positioning
 
-The literature and current tooling suggest a clear gap. Many discussions of RAG focus on retrieval quality, but fewer address the combined challenge of privacy, operational robustness, routing efficiency, and educational suitability in local deployments. Likewise, many prototypes demonstrate chat over documents but do not incorporate routing, reranking, verification, and indexing safeguards within one coherent platform.
+The literature and current tooling suggest a clear gap. Many discussions of RAG focus on retrieval quality, but fewer address the combined challenge of privacy, operational robustness, routing efficiency, and educational suitability in governed cloud-integrated deployments. Likewise, many prototypes demonstrate chat over documents but do not incorporate routing, reranking, verification, and indexing safeguards within one coherent platform.
 
 This project positions itself as a **systems-development response** to that gap. Its contribution is not the proposal of a new retrieval theory, but the practical integration of multiple proven design ideas into a single, locally deployable platform suitable for academic documents. In that sense, AcademicRAG contributes to applied educational technology by translating AI and information retrieval concepts into a usable institutional tool.
 
@@ -233,7 +233,7 @@ AcademicRAG uses a four-service architecture:
 1. **Frontend layer** – a Next.js and React interface running on port 3000.
 2. **Backend gateway** – a Python HTTP server running on port 8000 for session management, uploads, and API routing.
 3. **RAG API layer** – a Python service running on port 8001 to handle indexing and retrieval-based chat.
-4. **Model service layer** – Ollama on port 11434 for local model inference.
+4. **Model service layer** – Ollama Cloud API for managed model inference.
 
 Supporting these services are three storage layers:
 
@@ -251,7 +251,7 @@ Vector data is stored in LanceDB. The documentation indicates that separate text
 
 The persistence strategy has three advantages:
 
-1. It is lightweight enough for local deployment.
+1. It is lightweight enough for institutional and hybrid deployment.
 2. It preserves user history and document metadata.
 3. It allows retrieval components to operate independently of frontend state.
 
@@ -283,7 +283,7 @@ The overall indexing method shows a clear design intention: improve downstream r
 
 ## 3.6 Query Processing Workflow
 
-The query-processing methodology is one of the strongest aspects of the project.
+The query-processing methodology is a core aspect of the project.
 
 ### Step 1: Session-aware request handling
 
@@ -321,27 +321,36 @@ The project uses the following implementation environment:
 
 - **Frontend:** Next.js 15, React 19, TypeScript, Tailwind CSS, Radix UI, Framer Motion.
 - **Backend and RAG services:** Python 3.x.
-- **Model serving:** Ollama.
+- **Model serving:** Ollama Cloud.
 - **Embedding and retrieval libraries:** `transformers`, `torch`, `sentence-transformers`, `rerankers`, `rank-bm25`, and `lancedb`.
 - **Document processing:** `docling`, `PyMuPDF`, and supporting ingestion tools.
 - **Persistence:** SQLite and LanceDB.
 
-The project also includes a unified launcher script for starting Ollama, the RAG API, the backend, and the frontend together. This improves reproducibility and deployment convenience.
+The project also includes a unified launcher workflow for starting the RAG API, the backend, and the frontend together with configured model-service connectivity. This improves reproducibility and deployment convenience.
 
 ## 3.8 Evaluation Procedure
 
-Because this project is a systems-development study, evaluation focused on technical verification rather than participant-based experimentation. The evaluation procedure comprised four forms of evidence:
+Because this project is a systems-development study, evaluation focused on technical verification and reproducible engineering evidence rather than a large participant experiment. The evaluation procedure used five evidence streams:
 
 1. **Static architecture evidence** from implementation and documentation files.
-2. **Functional validation** from backend test scripts and health-check routines.
-3. **Operational benchmarks** reported in the system documentation.
-4. **Feature completeness analysis** based on implemented components and API interfaces.
+2. **Functional validation** from backend tests and health-check routines.
+3. **Operational dry-run evidence** from startup, readiness, and metrics probes.
+4. **Retrieval evaluation artifacts** from the versioned retrieval evaluation set and tuning outputs.
+5. **Feature completeness analysis** based on implemented components and API interfaces.
 
-The system health-check script validates imports, configuration consistency, embedding model behaviour, LanceDB access, agent initialization, and sample query capability. Backend tests validate the health endpoint, chat endpoint, and short-term conversation memory. These procedures do not constitute a formal retrieval benchmark, but they do provide reasonable engineering evidence that the prototype operates end-to-end.
+The system health-check script validates imports, configuration consistency, embedding model behaviour, LanceDB access, agent initialization, and sample query capability. Backend tests validate the health endpoint, chat endpoint, and short-term conversation memory. Release dry-run records provide readiness evidence (service startup, endpoint probes, metrics response, and observed minor issues). Retrieval tuning artifacts provide an initial quantitative baseline, although current published values indicate no measurable gain under the latest evaluated setup.
+
+To increase methodological clarity, the analysis in Chapter 4 is organised into three evaluation dimensions:
+
+- **Functional completeness** (whether required capabilities were implemented and callable).
+- **Operational reliability and performance** (startup stability, endpoint readiness, and latency ranges from documented runs).
+- **Retrieval-quality evidence** (current baseline metrics and their interpretation).
+
+This procedure does not replace a controlled user study; instead, it establishes a transparent engineering evidence base suitable for an applied master-level system artifact.
 
 ## 3.9 Ethical and Privacy Considerations
 
-The project's core design principle is privacy preservation. Documents are processed locally, model inference is served locally, and storage remains under user control. This is especially important in educational environments, where data may include confidential administrative content or sensitive academic materials.
+The project's core design principle is privacy preservation. Document processing and storage remain under institutional control, while model inference can be routed through Ollama Cloud with governed access and configuration. This is especially important in educational environments, where data may include confidential administrative content or sensitive academic materials.
 
 The system does not eliminate all ethical concerns. Incorrect answers are still possible, and users may still place too much trust in AI-generated outputs. However, the addition of source attribution, routing, and verification represents a responsible attempt to reduce those risks.
 
@@ -358,8 +367,8 @@ Functionally, the system supports:
 - Session creation, retrieval, renaming, and deletion.
 - File upload and association with sessions or indexes.
 - Persistent index creation and linkage.
-- Local document indexing with configurable chunking and enrichment settings.
-- Local chat over indexed documents.
+- Document indexing with configurable chunking and enrichment settings.
+- Chat over indexed documents.
 - Streaming response handling.
 - Hybrid retrieval and reranking options.
 - Optional verification.
@@ -410,7 +419,7 @@ These results indicate that the final system is meaningfully stronger than a bas
 
 ## 4.3 Reported Performance Results
 
-The project documentation provides engineering-oriented benchmark ranges. These are summarised in Table 4.1.
+Project documentation provides engineering-oriented benchmark ranges. These are summarised in Table 4.1.
 
 ### Table 4.1 Reported System Response Benchmarks
 
@@ -421,7 +430,7 @@ The project documentation provides engineering-oriented benchmark ranges. These 
 | Complex analysis | 15-30 seconds | Multi-step reasoning and broader evidence use |
 | Document indexing | 2-5 minutes per 100 MB | Depends on enrichment and processing configuration |
 
-These results suggest that the platform is usable for interactive academic document work, particularly where privacy is more important than ultra-low latency.
+These results suggest that the platform is usable for interactive academic document work, particularly where privacy, governance, and evidence traceability are prioritised over ultra-low latency.
 
 ### Table 4.2 Reported Resource Characteristics
 
@@ -445,11 +454,26 @@ The documentation also reports approximate scalability characteristics of 5-10 c
 
 These figures show that the system is engineered with practical deployment concerns in mind, especially document type variability.
 
-## 4.4 Validation and Testing Results
+## 4.4 Operational Dry-Run Evidence
+
+In addition to benchmark ranges, the project includes a documented release dry run that validates deployment readiness in a realistic workspace environment.
+
+### Table 4.4 Dry-Run Operational Evidence Summary
+
+| Check Category | Observed Outcome | Interpretation |
+|---|---|---|
+| Launcher startup | Services started in no-frontend mode | Core backend and RAG services can be brought up reliably |
+| Health endpoints | Backend and RAG liveness/readiness returned HTTP 200 | Services were operational and responsive |
+| Metrics endpoints | Both `/metrics` endpoints returned HTTP 200 | Basic observability pipeline is functioning |
+| Health script summary | 5/6 checks passed with minor issues | System was mostly healthy, with follow-up fixes recommended |
+
+Observed non-blocking issues in the dry run included deprecation warnings and an intermittent model request error during a sample query path. These findings are important because they demonstrate transparent reporting of remaining technical risks rather than only reporting successful outcomes.
+
+## 4.5 Validation and Testing Results
 
 The project includes explicit testing and validation scripts.
 
-### 4.4.1 System Health Check
+### 4.5.1 System Health Check
 
 The health-check script validates:
 
@@ -462,7 +486,7 @@ The health-check script validates:
 
 This indicates that the project includes operational checks beyond basic startup.
 
-### 4.4.2 Backend Tests
+### 4.5.2 Backend Tests
 
 The backend test script validates:
 
@@ -470,21 +494,35 @@ The backend test script validates:
 - The `/chat` endpoint.
 - Basic memory of short conversation history.
 
-Although these tests are modest, they are appropriate for a prototype system and show that the application was built with at least a minimal verification mindset.
+Although these tests are modest, they are appropriate for a prototype system and show that the application was built with a verification mindset.
 
-## 4.5 Analysis of the Project Against Objectives
+## 4.6 Retrieval-Evaluation Baseline and Interpretation
+
+The repository includes a versioned retrieval evaluation set and automated tuning outputs. The latest compact tuning result records baseline and candidate configurations with no measurable improvement and zero scored relevance metrics in the currently reported run.
+
+### Table 4.5 Latest Retrieval Tuning Snapshot
+
+| Metric | Baseline | Best Candidate | Delta |
+|---|---:|---:|---:|
+| Retrieval relevance @k | 0.0 | 0.0 | 0.0 |
+| MRR @k | 0.0 | 0.0 | 0.0 |
+| Citation hit rate @k | 0.0 | 0.0 | 0.0 |
+
+This result should be interpreted carefully. It does not mean retrieval is universally ineffective; rather, it indicates that the current labelled evaluation setup, table selection, or scoring alignment requires improvement before meaningful comparative claims can be made. Methodologically, this is an important finding because it identifies evaluation quality as the highest-priority gap for the next iteration.
+
+## 4.7 Analysis of the Project Against Objectives
 
 ### Objective 1: Analyse requirements
 
-This objective was achieved. The repository documents the need for privacy-preserving local document intelligence and provides corresponding architectural and deployment choices.
+This objective was achieved. The repository documents the need for privacy-aware document intelligence and provides corresponding architectural and deployment choices.
 
 ### Objective 2: Design a modular architecture
 
 This objective was achieved. The project clearly separates frontend, backend, retrieval API, model serving, and storage.
 
-### Objective 3: Implement a local RAG pipeline
+### Objective 3: Implement a cloud-enabled RAG pipeline
 
-This objective was achieved. The codebase includes document conversion, chunking, embedding, retrieval, synthesis, and persistence.
+This objective was achieved. The codebase includes document conversion, chunking, embedding, retrieval, answer generation, and persistence.
 
 ### Objective 4: Improve a baseline RAG approach
 
@@ -498,7 +536,7 @@ This objective was partially achieved. Functional and engineering assessment is 
 
 This objective was achieved conceptually. The system is strongly aligned with the needs of privacy-sensitive academic document environments.
 
-## 4.6 Educational Use Scenarios
+## 4.8 Educational Use Scenarios
 
 The platform has clear relevance to educational institutions. Possible practical scenarios include:
 
@@ -508,7 +546,7 @@ The platform has clear relevance to educational institutions. Possible practical
 4. **Student support services:** helping staff access approved policy guidance quickly without exposing documents externally.
 5. **Institutional knowledge retention:** making archived reports and procedural documents more accessible to new staff.
 
-These scenarios illustrate the practical significance of a local document intelligence platform in education.
+These scenarios illustrate the practical significance of a privacy-aware document intelligence platform in education.
 
 ---
 
@@ -516,7 +554,7 @@ These scenarios illustrate the practical significance of a local document intell
 
 ## 5.1 Interpretation of Findings
 
-The main finding of this project is that a local, privacy-preserving document intelligence platform can be implemented with a relatively lightweight but modular architecture using current open-source tools. The system demonstrates that strong practical value can be achieved without relying on external cloud inference for sensitive documents.
+The main finding of this project is that a privacy-aware document intelligence platform can be implemented with a relatively lightweight but modular architecture using current open-source tools. The system demonstrates that strong practical value can be achieved when governance controls are built into ingestion, retrieval, and response workflows.
 
 A second important finding is that quality-oriented architectural additions matter. The project does not treat RAG as a single retrieval step followed by a prompt. Instead, it introduces routing, enrichment, hybrid retrieval, reranking, and verification. Together, these mechanisms form a layered reliability strategy.
 
@@ -526,9 +564,9 @@ The dual-layer routing approach is particularly important. Many user queries in 
 
 The project makes five main contributions.
 
-### 5.2.1 A local deployment model for academic AI
+### 5.2.1 A governed deployment model for academic AI
 
-The system demonstrates a practical architecture for keeping document processing local. This is an important contribution in education, where privacy and institutional control are often decisive factors in technology adoption.
+The system demonstrates a practical architecture for combining institutional document control with configurable model inference. This is an important contribution in education, where privacy and governance are often decisive factors in technology adoption.
 
 ### 5.2.2 Integration of multiple retrieval-enhancement strategies
 
@@ -536,7 +574,7 @@ Rather than relying on a single retrieval technique, the platform integrates hyb
 
 ### 5.2.3 Adaptive routing for cost and latency control
 
-The use of routing between direct LLM answers and RAG-based answers is a practical innovation that reflects user-intent variation. This improves efficiency without abandoning answer grounding.
+The use of routing between direct LLM answers and RAG-based answers is a practical innovation that reflects user-intent variation. This improves efficiency while preserving grounded retrieval for document-specific queries.
 
 ### 5.2.4 Reliability-oriented answer verification
 
@@ -553,7 +591,7 @@ This project is well aligned with the field of Information Technology in Educati
 AcademicRAG is relevant to this field in three ways.
 
 1. It supports **knowledge accessibility**, enabling users to query large bodies of academic documents in natural language.
-2. It supports **ethical deployment**, prioritising privacy and local control.
+2. It supports **ethical deployment**, prioritising privacy and controlled cloud integration.
 3. It supports **institutional capacity building**, since the system can potentially be deployed within universities, departments, or libraries without dependence on external hosted AI providers.
 
 These characteristics make the project a meaningful example of applied educational IT.
@@ -582,22 +620,22 @@ The current project contains strong implementation evidence but limited formal r
 
 Several limitations should be acknowledged.
 
-First, the project does not yet present a formal comparative experiment against baseline systems or cloud alternatives. Second, retrieval quality is not measured using a labelled academic corpus with standard information retrieval metrics. Third, some advanced features remain incomplete or experimental, particularly graph-based and fully multimodal capabilities. Fourth, the system's documented performance depends on hardware and model configuration, so results may vary across deployment environments.
+First, the project does not yet present a full comparative experiment against multiple external baseline systems. Second, current retrieval-evaluation outputs indicate that metric instrumentation and dataset-label alignment still need refinement before robust quality conclusions can be drawn. Third, some advanced features remain incomplete or experimental, particularly graph-based and fully multimodal capabilities. Fourth, the system's documented performance depends on hardware and model configuration, so results may vary across deployment environments.
 
 These limitations mean that the project should be understood primarily as a strong systems-development prototype rather than a final benchmarked research product.
 
 ## 5.6 Future Work
 
-The repository documentation and architecture suggest several promising directions for future work:
+The repository documentation and architecture suggest several high-impact directions for future work:
 
-1. Formal evaluation using an annotated academic question-answer dataset.
-2. Human usability testing with staff, lecturers, or postgraduate students.
-3. More mature support for multiple document formats.
-4. Full multimodal retrieval over text, images, tables, and charts.
-5. Knowledge-graph integration for relationship-aware queries.
-6. Incremental indexing and improved large-collection management.
-7. Stronger citation formatting and answer provenance in the user interface.
-8. Deployment packaging for university servers or departmental workstations.
+1. Repair and extend retrieval evaluation with stronger gold annotations, clear relevance labels, and repeatable benchmark scripts.
+2. Conduct human usability testing with staff, lecturers, and postgraduate students in realistic institutional tasks.
+3. Add comparative baselines (BM25-only, dense-only, hybrid, hybrid+reranker, hybrid+reranker+verifier).
+4. Improve multilingual handling, including Khmer and mixed-language institutional documents.
+5. Expand document support beyond PDF with robust table and image extraction.
+6. Progress graph-based and multimodal retrieval from experimental to production quality.
+7. Strengthen citation rendering and provenance tracing in the user interface.
+8. Package deployment profiles for university servers and constrained departmental workstations.
 
 These improvements would strengthen both the academic rigor and the practical impact of the platform.
 
@@ -605,15 +643,15 @@ These improvements would strengthen both the academic rigor and the practical im
 
 # CHAPTER 6: CONCLUSION
 
-This report presented AcademicRAG, a privacy-preserving local document intelligence platform developed to support question answering over academic and institutional documents. The project addressed an important problem in educational settings: how to make document collections more searchable and useful without uploading sensitive content to external AI services.
+This report presented AcademicRAG, a document intelligence platform developed to support question answering over academic and institutional documents. The project addressed an important problem in educational settings: how to make document collections more searchable and useful while maintaining privacy and governance.
 
-The completed system demonstrates a substantial technical achievement. It combines a modern frontend, backend orchestration, session persistence, local model serving, vector storage, indexing, hybrid retrieval, reranking, routing, and verification into one coherent platform. The project therefore meets its central aim of creating a local RAG-based document intelligence prototype.
+The completed system demonstrates a substantial technical achievement. It combines a modern frontend, backend orchestration, session persistence, model serving, vector storage, indexing, hybrid retrieval, reranking, routing, and verification into one coherent platform. The project therefore meets its central aim of creating a cloud-enabled RAG-based document intelligence prototype.
 
-The findings of the study suggest that local AI deployment is both feasible and valuable for education-focused knowledge work. AcademicRAG shows that privacy and usability do not need to be treated as opposing goals. Through layered retrieval controls and operational safeguards, the system also demonstrates how a more reliable and context-aware alternative to a basic document chatbot can be built.
+The findings of the study suggest that privacy-aware AI deployment is feasible and valuable for education-focused knowledge work. AcademicRAG shows that privacy and usability do not need to be treated as opposing goals. Through layered retrieval controls and operational safeguards, the system also demonstrates how a more reliable and context-aware alternative to a basic document chatbot can be built.
 
-At the same time, the project remains an evolving system. Its evaluation is currently stronger on engineering evidence than on formal experimental metrics, and some advanced features remain incomplete. These limitations point directly to future research and development opportunities.
+At the same time, the project remains an evolving system. Its evaluation is currently stronger on engineering evidence than on formal retrieval-quality metrics, and some advanced features remain incomplete. These limitations point directly to future research and development opportunities.
 
-In conclusion, AcademicRAG makes a meaningful contribution as an applied educational technology project. It provides a practical foundation for secure academic knowledge retrieval and offers a strong basis for future enhancement, institutional deployment, and more rigorous evaluation.
+In conclusion, AcademicRAG makes a meaningful contribution as an applied educational technology project. It provides a practical foundation for secure academic knowledge retrieval in the RUPP and broader Cambodian context and offers a strong basis for future enhancement, institutional deployment, and more rigorous evaluation.
 
 ---
 
@@ -652,7 +690,7 @@ AcademicRAG Source Code Repository. (2026). *Implementation files including back
 
 | Feature | Purpose |
 |---|---|
-| Local processing | Keeps sensitive documents on local infrastructure |
+| Privacy-aware processing | Keeps sensitive document workflows under institutional control |
 | Session management | Preserves chat history and user workflow |
 | Hybrid retrieval | Improves retrieval robustness across question types |
 | Dual-layer routing | Reduces unnecessary retrieval cost and latency |

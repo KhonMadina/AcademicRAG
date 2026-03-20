@@ -226,9 +226,9 @@ function StructuredMessageBlock({
               <div className="whitespace-pre-wrap">
                 <ThinkingText text={normalizeWhitespace(typeof finalStep.details.answer === 'string' ? finalStep.details.answer : '')} />
               </div>
-              {!hideCitations && !hasSubAnswers && Array.isArray(finalStep.details.source_documents) && finalStep.details.source_documents.length > 0 && (
+              {/* {!hideCitations && !hasSubAnswers && Array.isArray(finalStep.details.source_documents) && finalStep.details.source_documents.length > 0 && (
                 <CitationsBlock docs={finalStep.details.source_documents.map(toCitationDoc).filter((doc): doc is CitationDoc => doc !== null)} />
-              )}
+              )} */}
             </div>
           ) : finalStep.details && typeof finalStep.details === 'string' ? (
             <div className="whitespace-pre-wrap">

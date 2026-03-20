@@ -574,7 +574,13 @@ export const SessionChat = forwardRef<SessionChatRef, SessionChatProps>(({
 
     } catch (error) {
       console.error('Failed to send message:', error)
-      setError(apiService.getActionableErrorMessage(error, 'chat'))
+      const actionableMessage = apiService.getActionableErrorMessage(error, 'chat')
+      setError(actionableMessage)
+      setMessages(prev => {
+        const cleaned = prev.filter(m => m.metadata?.message_type !== 'in_progress')
+        const errorMessage = apiService.createMessage(actionableMessage, 'assistant')
+        return [...cleaned, errorMessage]
+      })
     } finally {
       setIsLoading(false)
     }

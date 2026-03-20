@@ -1,0 +1,21 @@
+flowchart TD
+    Q[User Query] --> R1{Layer 1 Routing\nDirect or RAG?}
+
+    R1 -->|Direct| DA[Direct LLM Answer]
+    R1 -->|RAG| R2[Layer 2 Intelligent Routing]
+
+    R2 --> T[Query Transform]
+    T --> RET[Retrieve Candidates\nDense BM25 Hybrid]
+    RET --> RR[AI Reranking]
+    RR --> CE[Context Expansion]
+    CE --> SYN[Answer Synthesis]
+    SYN --> V{Verification Enabled?}
+    V -->|Yes| VER[Grounding Verification]
+    V -->|No| OUT[Final Answer + Sources]
+    VER --> OUT
+    DA --> OUT
+
+    classDef main fill:#f0f7ff,stroke:#2e6fb6,stroke-width:1.2px,color:#1d3557;
+    classDef gate fill:#fff4f2,stroke:#b84d3f,stroke-width:1.2px,color:#4a2c28;
+    class Q,R2,T,RET,RR,CE,SYN,VER,DA,OUT main;
+    class R1,V gate;

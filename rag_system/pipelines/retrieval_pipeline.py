@@ -369,6 +369,15 @@ class RetrievalPipeline:
 
     def _synthesize_final_answer(self, query: str, facts: str, *, event_callback=None) -> str:
         """Uses a text LLM to synthesize a final answer from extracted facts."""
+        # Keep synthesis prompts within a practical budget before they reach the Ollama client.
+        max_context_chars = max(4000, int(os.getenv("RAG_SYNTHESIS_MAX_CONTEXT_CHARS", "32000")))
+        bounded_facts = str(facts or "")
+        if len(bounded_facts) > max_context_chars:
+            bounded_facts = (
+                bounded_facts[:max_context_chars]
+                + "\n\n[Additional retrieved context omitted due to context budget.]"
+            )
+
         prompt = f"""
 You are an AI assistant specialised in answering questions from retrieved context.
 
@@ -391,7 +400,7 @@ Return only the answer text as plain prose.
 Do not include section headers (e.g., "Answer:" or "Retrieved Snippets"), prompt text, or the snippets themselves.
 
   Retrieved Snippets  
-{facts}
+{bounded_facts}
 
 
 ORIGINAL QUESTION: "{query}"

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Hybrid retrieval icon">
+  <rect width="512" height="512" rx="60" fill="#f8fafc"/>
+  <circle cx="170" cy="190" r="70" fill="#dbeafe" stroke="#2563eb" stroke-width="8"/>
+  <circle cx="330" cy="190" r="70" fill="#dcfce7" stroke="#16a34a" stroke-width="8"/>
+  <rect x="146" y="290" width="220" height="110" rx="20" fill="#111827"/>
+  <path d="M216 338 L248 370 L296 320" fill="none" stroke="#34d399" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="240" y1="190" x2="272" y2="190" stroke="#64748b" stroke-width="10"/>
+  <text x="114" y="198" font-family="Verdana, sans-serif" font-size="28" fill="#1e3a8a">Dense</text>
+  <text x="292" y="198" font-family="Verdana, sans-serif" font-size="28" fill="#166534">BM25</text>
+</svg>

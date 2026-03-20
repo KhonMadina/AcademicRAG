@@ -1,11 +1,153 @@
-from typing import List, Any, Dict
+from collections import OrderedDict
+from typing import List, Any, Dict, Tuple
 import json
 from rag_system.utils.ollama_client import OllamaClient
 
 class QueryDecomposer:
+    _SYSTEM_PROMPT = """
+You are an expert at query decomposition for a Retrieval-Augmented Generation (RAG) system.
+
+Return one RFC-8259 compliant JSON object and nothing else.
+Schema:
+{
+  "requires_decomposition": <bool>,
+  "reasoning": <string>,
+  "resolved_query": <string>,
+  "sub_queries": <string[]>
+}
+
+Rules:
+1. Resolve context first using chat_history when references are unambiguous.
+2. Use resolved_query (not raw query) to decide if decomposition is needed.
+3. If requires_decomposition is false, return exactly one sub-query equal to resolved_query.
+4. If requires_decomposition is true, return 2-10 standalone sub-queries.
+5. Keep each sub-query self-contained and avoid pronouns.
+6. Keep reasoning concise (max 50 words).
+
+Decomposition is typically required for:
+- Multi-part questions joined by "and", "also", comma lists, etc.
+- Comparative/superlative questions across entities.
+- Temporal/sequential comparisons.
+- Enumerations (pros/cons/impacts/cost breakdowns).
+
+Decomposition is typically not required for:
+- A single factual information need.
+- Queries that are too ambiguous and need clarification.
+""".strip()
+
+    _FEW_SHOT_EXAMPLES = """
+Example:
+chat_history: ["What is the email address of the computer vision consultants?"]
+query: "What is their revenue?"
+{
+  "requires_decomposition": false,
+  "reasoning": "Pronoun is resolvable and this is a single information need.",
+  "resolved_query": "What is the revenue of the computer vision consultants?",
+  "sub_queries": ["What is the revenue of the computer vision consultants?"]
+}
+
+Example:
+chat_history: []
+query: "How did Nvidia's 2024 revenue compare with 2023?"
+{
+  "requires_decomposition": true,
+  "reasoning": "Needs separate retrieval for each year before comparison.",
+  "resolved_query": "How did Nvidia's 2024 revenue compare with 2023?",
+  "sub_queries": [
+  "What was Nvidia's revenue in 2024?",
+  "What was Nvidia's revenue in 2023?"
+  ]
+}
+
+Example:
+chat_history: []
+query: "List the pros, cons, and estimated implementation cost of adopting a vector database."
+{
+  "requires_decomposition": true,
+  "reasoning": "Three distinct information needs.",
+  "resolved_query": "List the pros, cons, and estimated implementation cost of adopting a vector database.",
+  "sub_queries": [
+  "What are the pros of adopting a vector database?",
+  "What are the cons of adopting a vector database?",
+  "What is the estimated implementation cost of adopting a vector database?"
+  ]
+}
+""".strip()
+
     def __init__(self, llm_client: OllamaClient, llm_model: str):
         self.llm_client = llm_client
         self.llm_model = llm_model
+        # Small in-memory LRU cache to avoid repeat decomposition for near-identical turns.
+        self._cache: OrderedDict[Tuple[str, str, int], List[str]] = OrderedDict()
+        self._cache_max_entries = 256
+
+    def _make_cache_key(self, query: str, chat_history_text: str, max_sub_queries: int) -> Tuple[str, str, int]:
+        return (query.strip().lower(), chat_history_text.strip().lower(), int(max_sub_queries))
+
+    def _cache_get(self, key: Tuple[str, str, int]) -> List[str] | None:
+        value = self._cache.get(key)
+        if value is None:
+            return None
+        # Refresh recency for LRU behavior.
+        self._cache.move_to_end(key)
+        return list(value)
+
+    def _cache_set(self, key: Tuple[str, str, int], value: List[str]) -> None:
+        self._cache[key] = list(value)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_max_entries:
+            self._cache.popitem(last=False)
+
+    def _extract_json_object(self, text: str) -> Dict[str, Any]:
+        payload = str(text or "").strip()
+        if payload.startswith("```json"):
+            payload = payload[7:]
+        if payload.startswith("```"):
+            payload = payload[3:]
+        if payload.endswith("```"):
+            payload = payload[:-3]
+        payload = payload.strip()
+
+        # Fast path.
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: find first JSON object boundaries in noisy text.
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(payload[start : end + 1])
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    def _normalize_output(self, data: Dict[str, Any], query: str, max_sub_queries: int) -> List[str]:
+        resolved_query = str(data.get("resolved_query") or query).strip() or query
+        requires_decomposition = bool(data.get("requires_decomposition", False))
+
+        raw_sub_queries = data.get("sub_queries")
+        if not isinstance(raw_sub_queries, list):
+            raw_sub_queries = []
+
+        normalized_sub_queries: List[str] = []
+        for item in raw_sub_queries:
+            text = str(item).strip()
+            if text:
+                normalized_sub_queries.append(text)
+
+        if not requires_decomposition:
+            normalized_sub_queries = [resolved_query]
+        elif not normalized_sub_queries:
+            normalized_sub_queries = [resolved_query]
+
+        # De-duplicate while preserving order.
+        normalized_sub_queries = list(dict.fromkeys(normalized_sub_queries))
+
+        safe_limit = max(1, int(max_sub_queries or 1))
+        return normalized_sub_queries[:safe_limit]
 
     def decompose(
         self,
@@ -21,9 +163,13 @@ class QueryDecomposer:
             The latest user message.
         chat_history : list[dict] | None
             Recent conversation turns (each item should contain at least the original
-            user query under the key ``"query"``). Only the **last 5** turns are
+            user query under the key "query"). Only the last 5 turns are
             included to keep the prompt short.
         """
+
+        query = str(query or "").strip()
+        if not query:
+            return [""]
 
         # ---- Limit history to last 5 user turns and extract the queries ----
         history_snippets: List[str] = []
@@ -32,229 +178,23 @@ class QueryDecomposer:
             recent_turns = chat_history[-5:]
             # Extract user queries (fallback: full dict as string if key missing)
             for turn in recent_turns:
-                history_snippets.append(str(turn.get("query", turn)))
+                snippet = str(turn.get("query", turn)).strip().replace("\n", " ")
+                if snippet:
+                    # Bound each snippet to keep prompt compact.
+                    history_snippets.append(snippet[:200])
 
         # Serialize chat_history for the prompt (single string)
         chat_history_text = " | ".join(history_snippets)
 
-        # ---- Build the new SYSTEM prompt with added legacy examples ----
-        system_prompt = """
-You are an expert at query decomposition for a Retrieval-Augmented Generation (RAG) system.
-
-Return one RFC-8259-compliant JSON object and nothing else.
-Schema:
-{
-requires_decomposition: <bool>,
-reasoning:              <string>,  //  50 words
-resolved_query:         <string>,  // query after context resolution
-sub_queries:            <string[]> // 110 standalone items
-}
-
-Think step-by-step internally, but reveal only the concise reasoning.
-
-
-
-Context Resolution  (perform FIRST)
-
-You will receive:
-		query  the current user message
-		chat_history  the most recent user turns (may be empty)
-
-If query contains pronouns, ellipsis, or shorthand that can be unambiguously linked to something in chat_history, rewrite it to a fully self-contained question and place the result in resolved_query.
-Otherwise, copy query into resolved_query unchanged.
-
-
-
-When is decomposition REQUIRED?
-		MULTI-PART questions joined by and, or, also, list commas, etc.
-		COMPARATIVE / SUPERLATIVE questions (two or more entities, e.g. bigger, better, fastest).
-		TEMPORAL / SEQUENTIAL questions (changes over time, event timelines).
-		ENUMERATIONS (pros, cons, impacts).
-		ENTITY-SET COMPARISONS (A, B, C revenue).
-
-When is decomposition NOT REQUIRED?
-		A single, factual information need.
-		Ambiguous queries needing clarification rather than splitting.
-
-
-
-Output rules
-	1.	Use resolved_querynot the raw queryto decide on decomposition.
-	2.	If requires_decomposition is false, sub_queries must contain exactly resolved_query.
-	3.	Otherwise, produce 210 self-contained questions; avoid pronouns and shared context.
-
-
-"""
-
-        # ---- Append NEW examples provided by the user ----
-        new_examples = """
-
-Normalise pronouns and references: turn this paper into the explicit title if it can be inferred, otherwise leave as-is.
-chat_history: What is the email address of the computer vision consultants?
-query: What is their revenue?
-
-{
-  "requires_decomposition": false,
-  "reasoning": "Pronoun resolved; single information need.",
-  "resolved_query": "What is the revenue of the computer vision consultants?",
-  "sub_queries": [
-    "What is the revenue of the computer vision consultants?"
-  ]
-}
-
-Context resolution (single info need)
-chat_history: What is the email address of the computer vision consultants?
-query: What is the address?
-
-{
-  "requires_decomposition": false,
-  "reasoning": "Pronoun resolved; single information need.",
-  "resolved_query": "What is the physical address of the computer vision consultants?",
-  "sub_queries": [
-    "What is the physical address of the computer vision consultants?"
-  ]
-}
-
-Context resolution (single info need)
-chat_history: ComputeX has a revenue of 100M?
-query: Who is the CEO?
-
-{
-  "requires_decomposition": false,
-  "reasoning": "entities normalization.",
-  "resolved_query": "who is the CEO of ComputeX",
-  "sub_queries": [
-    "who is the CEO of ComputeX"
-  ]
-}
-
-No unique antecedent  leave unresolved
-chat_history: Tell me about the paper.
-query: What is the address?
-
-{
-  "requires_decomposition": false,
-  "reasoning": "Ambiguous reference; cannot resolve safely.",
-  "resolved_query": "What is the address?",
-  "sub_queries": ["What is the address?"]
-}
-
-Temporal + Comparative
-chat_history: ""
-query: How did Nvidias 2024 revenue compare with 2023?
-
-{
-  "requires_decomposition": true,
-  "reasoning": "Needs revenue for two separate years before comparison.",
-  "resolved_query": "How did Nvidias 2024 revenue compare with 2023?",
-  "sub_queries": [
-    "What was Nvidias revenue in 2024?",
-    "What was Nvidias revenue in 2023?"
-  ]
-}
-
-Enumeration (pros / cons / cost)
-chat_history: ""
-query: List the pros, cons, and estimated implementation cost of adopting a vector database.
-
-{
-  "requires_decomposition": true,
-  "reasoning": "Three distinct information needs: pros, cons, cost.",
-  "resolved_query": "List the pros, cons, and estimated implementation cost of adopting a vector database.",
-  "sub_queries": [
-    "What are the pros of adopting a vector database?",
-    "What are the cons of adopting a vector database?",
-    "What is the estimated implementation cost of adopting a vector database?"
-  ]
-}
-
-Entity-set comparison (multiple companies)
-chat_history: ""
-query: How did Nvidia, AMD, and Intel perform in Q2 2025 in terms of revenue?
-
-{
-  "requires_decomposition": true,
-  "reasoning": "Need revenue for each of three entities before comparison.",
-  "resolved_query": "How did Nvidia, AMD, and Intel perform in Q2 2025 in terms of revenue?",
-  "sub_queries": [
-    "What was Nvidia's revenue in Q2 2025?",
-    "What was AMD's revenue in Q2 2025?",
-    "What was Intel's revenue in Q2 2025?"
-  ]
-}
-
-Multi-part question (limitations + mitigations)
-chat_history: ""
-query: What are the limitations of GPT-4o and what are the recommended mitigations?
-
-{
-  "requires_decomposition": true,
-  "reasoning": "Two distinct pieces of information: limitations and mitigations.",
-  "resolved_query": "What are the limitations of GPT-4o and what are the recommended mitigations?",
-  "sub_queries": [
-    "What are the known limitations of GPT-4o?",
-    "What are the recommended mitigations for the limitations of GPT-4o?"
-  ]
-}
-"""
-
-        # ---- Append legacy examples that already existed in the old prompt ----
-        legacy_examples_header = """
-
-
-Additional legacy examples
-"""
-
-        legacy_examples_body = """
-**Example 1: Multi-Part Query**
-Query: "What were the main findings of the aiconfig report and how do they compare to the results from the RAG paper?"
-JSON Output:
-{
-  "reasoning": "The query asks for two distinct pieces of information: the findings from one report and a comparison to another. This requires two separate retrieval steps.",
-  "sub_queries": [
-    "What were the main findings of the aiconfig report?",
-    "How do the findings of the aiconfig report compare to the results from the RAG paper?"
-  ]
-}
-
-**Example 2: Simple Query**
-Query: "Summarize the contributions of the DeepSeek-V3 paper."
-JSON Output:
-{
-  "reasoning": "This is a direct request for a summary of a single document and does not contain multiple parts.",
-  "sub_queries": [
-    "Summarize the contributions of the DeepSeek-V3 paper."
-  ]
-}
-
-**Example 3: Comparative Query**
-Query: "Did Microsoft or Google make more money last year?"
-JSON Output:
-{
-  "reasoning": "This is a comparative query that requires fetching the profit for each company before a comparison can be made.",
-  "sub_queries": [
-    "How much profit did Microsoft make last year?",
-    "How much profit did Google make last year?"
-  ]
-}
-
-**Example 4: Comparative Query with different phrasing**
-Query: "Who has more siblings, Jamie or Sansa?"
-JSON Output:
-{
-  "reasoning": "This comparative query needs the sibling count for both individuals to be answered.",
-  "sub_queries": [
-    "How many siblings does Jamie have?",
-    "How many siblings does Sansa have?"
-  ]
-}
-"""
+        cache_key = self._make_cache_key(query, chat_history_text, max_sub_queries)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
         full_prompt = (
-            system_prompt
-            + new_examples
-            # + legacy_examples_header
-            # + legacy_examples_body
+            self._SYSTEM_PROMPT
+            + "\n\n"
+            + self._FEW_SHOT_EXAMPLES
             + """
 
 
@@ -271,39 +211,17 @@ Input payload:
         response = self.llm_client.generate_completion(self.llm_model, full_prompt, format="json")
 
         response_text = response.get('response', '{}')
-        try:
-            # Handle potential markdown code blocks in the response
-            if response_text.strip().startswith("```json"):
-                response_text = response_text.strip()[7:-3].strip()
-
-            data = json.loads(response_text)
-
-            sub_queries = data.get('sub_queries') or [query]
-            reasoning = data.get('reasoning', 'No reasoning provided.')
-
-            print(f"Query Decomposition Reasoning: {reasoning}")
-
-            # Fallback: ensure at least the resolved_query if sub_queries empty
-            if not sub_queries:
-              sub_queries = [data.get('resolved_query', query)]
-
-            # Normalize and drop empty values
-            normalized_sub_queries: List[str] = []
-            for item in sub_queries:
-              text = str(item).strip()
-              if text:
-                normalized_sub_queries.append(text)
-            sub_queries = normalized_sub_queries or [query]
-
-            # Deduplicate while preserving order
-            sub_queries = list(dict.fromkeys(sub_queries))
-
-            # Enforce configured sub-query limit
-            safe_limit = max(1, int(max_sub_queries or 1))
-            return sub_queries[:safe_limit]
-        except json.JSONDecodeError:
+        data = self._extract_json_object(response_text)
+        if not data:
             print(f"Failed to decode JSON from query decomposer: {response_text}")
             return [query]
+
+        reasoning = data.get('reasoning', 'No reasoning provided.')
+        print(f"Query Decomposition Reasoning: {reasoning}")
+
+        sub_queries = self._normalize_output(data, query, max_sub_queries)
+        self._cache_set(cache_key, sub_queries)
+        return sub_queries
 
 class HyDEGenerator:
     def __init__(self, llm_client: OllamaClient, llm_model: str):

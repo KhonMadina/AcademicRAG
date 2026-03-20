@@ -1,0 +1,25 @@
+flowchart LR
+    U[User Browser]
+    FE[Frontend\nNext.js React]
+    BE[Backend Gateway\nPython HTTP Server :8000]
+    RAG[RAG API\nPython Service :8001]
+    OLLAMA[Ollama Cloud\nLLM Inference]
+
+    SQL[(SQLite\nSessions Metadata)]
+    LDB[(LanceDB\nVector Store)]
+    FS[(File System\nUploads Overviews)]
+
+    U --> FE
+    FE -->|HTTP JSON| BE
+    BE -->|Internal API| RAG
+    RAG -->|Model Calls| OLLAMA
+
+    BE --> SQL
+    RAG --> SQL
+    RAG --> LDB
+    RAG --> FS
+
+    classDef service fill:#eaf3ff,stroke:#1b4f9c,stroke-width:1.5px,color:#0e2a52;
+    classDef storage fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#222;
+    class U,FE,BE,RAG,OLLAMA service;
+    class SQL,LDB,FS storage;

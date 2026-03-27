@@ -8,28 +8,44 @@ class MarkdownRecursiveChunker:
     and embeds document-level metadata into each chunk.
     """
 
-    def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 200, tokenizer_model: str = "nomic-embed-text:v1.5"):
+    def __init__(self, max_chunk_size: int = 1500, min_chunk_size: int = 200, tokenizer_model: str = "nomic-embed-text:v1.5", backend: str = None):
+        """
+        backend: 'huggingface', 'ollama', or None (auto-detect)
+        """
         self.max_chunk_size = max_chunk_size
         self.min_chunk_size = min_chunk_size
         self.split_priority = ["\n## ", "\n### ", "\n#### ", "```", "\n\n"]
-        
-        repo_id = tokenizer_model
-        if "/" not in tokenizer_model:
+
+        # Auto-detect backend if not specified
+        if backend is None:
+            if ":" in tokenizer_model:
+                backend = "ollama"
+            else:
+                backend = "huggingface"
+        self.backend = backend
+
+        if self.backend == "huggingface":
             repo_id = tokenizer_model
-        
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
-        except Exception as e:
-            print(f"Warning: Failed to load tokenizer {repo_id}: {e}")
-            print("Falling back to character-based approximation (4 chars  1 token)")
+            if "/" not in tokenizer_model:
+                repo_id = tokenizer_model
+            try:
+                from transformers import AutoTokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
+                print(f"Loaded HuggingFace tokenizer: {repo_id}")
+            except Exception as e:
+                print(f"Warning: Failed to load tokenizer {repo_id}: {e}")
+                print("Falling back to character-based approximation (4 chars  1 token)")
+                self.tokenizer = None
+        else:
+            print(f"Using Ollama or fallback backend for model: {tokenizer_model}")
             self.tokenizer = None
 
     def _token_len(self, text: str) -> int:
-        """Get token count for text using the tokenizer."""
-        if self.tokenizer is not None:
+        """Get token count for text using the tokenizer or fallback."""
+        if self.backend == "huggingface" and self.tokenizer is not None:
             return len(self.tokenizer.tokenize(text))
-        else:
-            return max(1, len(text) // 4)
+        # For Ollama or fallback, use character-based approximation (4 chars ≈ 1 token)
+        return max(1, len(text) // 4)
     
     def _split_text(self, text: str, separators: List[str]) -> List[str]:
         final_chunks = []

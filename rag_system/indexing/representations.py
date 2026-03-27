@@ -18,7 +18,10 @@ class QwenEmbedder(EmbeddingModel):
     """
     An embedding model that uses a local Hugging Face transformer model.
     """
-    def __init__(self, model_name: str = "nomic-embed-text:v1.5"):
+    def __init__(self, model_name: str = "nomic-embed-text:v1.5", backend: str = None):
+        """
+        backend: 'huggingface', 'ollama', or None (auto-detect)
+        """
         self.model_name = model_name
         # Auto-select the best available device: CUDA > MPS > CPU
         if torch.cuda.is_available():
@@ -28,20 +31,31 @@ class QwenEmbedder(EmbeddingModel):
         else:
             self.device = "cpu"
 
-        # Use model-specific cache
-        if model_name not in _MODEL_CACHE:
-            print(f"Initializing HF Embedder with model '{model_name}' on device '{self.device}'. (first load)")
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, padding_side="left")
-            model = AutoModel.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype=torch.float16 if self.device != "cpu" else None,
-            ).to(self.device).eval()
-            _MODEL_CACHE[model_name] = (tokenizer, model)
-            print(f"QwenEmbedder weights loaded and cached for {model_name}.")
+        # Auto-detect backend if not specified
+        if backend is None:
+            if ":" in model_name:
+                backend = "ollama"
+            else:
+                backend = "huggingface"
+        self.backend = backend
+
+        if self.backend == "huggingface":
+            if model_name not in _MODEL_CACHE:
+                print(f"Initializing HF Embedder with model '{model_name}' on device '{self.device}'. (first load)")
+                from transformers import AutoTokenizer, AutoModel
+                tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, padding_side="left")
+                model = AutoModel.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if self.device != "cpu" else None,
+                ).to(self.device).eval()
+                _MODEL_CACHE[model_name] = (tokenizer, model)
+            else:
+                print(f"Reusing cached QwenEmbedder weights for {model_name}.")
         else:
-            print(f"Reusing cached QwenEmbedder weights for {model_name}.")
-        
+            print(f"Using Ollama backend for model: {model_name}")
+            _MODEL_CACHE[model_name] = (None, None)
+            print(f"QwenEmbedder weights loaded and cached for {model_name}.")
         self.tokenizer, self.model = _MODEL_CACHE[model_name]
 
     def create_embeddings(self, texts: List[str]) -> np.ndarray:

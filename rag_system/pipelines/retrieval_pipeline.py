@@ -77,6 +77,7 @@ class RetrievalPipeline:
         self._query_result_cache: Dict[str, Dict[str, Any]] = {}
 
     def _build_query_cache_key(self, query: str, table_name: str | None) -> str:
+        logger = logging.getLogger(__name__)
         search_type = self.retriever_configs.get("search_type", "hybrid")
         dense_weight = float(
             self.retriever_configs.get("dense", {}).get(
@@ -95,29 +96,39 @@ class RetrievalPipeline:
             "context_window_size": int(self.config.get("context_window_size", 0)),
         }
         serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        cache_key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        logger.debug("Built query cache key: %s for payload: %s", cache_key, payload)
+        return cache_key
 
     def _get_cached_query_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        logger = logging.getLogger(__name__)
         if not self._query_result_cache_enabled:
+            logger.debug("Query result cache is disabled.")
             return None
         cached = self._query_result_cache.get(cache_key)
         if not cached:
+            logger.debug("No cached result for key: %s", cache_key)
             return None
         age_seconds = time.time() - float(cached.get("ts", 0.0))
         if age_seconds > self._query_result_cache_ttl_seconds:
+            logger.debug("Cached result for key %s expired (age: %.2fs)", cache_key, age_seconds)
             self._query_result_cache.pop(cache_key, None)
             return None
         result = cached.get("result") or {}
+        logger.debug("Returning cached result for key: %s", cache_key)
         return {
             "answer": result.get("answer", ""),
             "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
         }
 
     def _store_cached_query_result(self, cache_key: str, result: Dict[str, Any]) -> None:
+        logger = logging.getLogger(__name__)
         if not self._query_result_cache_enabled:
+            logger.debug("Query result cache is disabled. Not storing result.")
             return
         if len(self._query_result_cache) >= self._query_result_cache_max_entries:
             oldest_key = min(self._query_result_cache.items(), key=lambda item: float(item[1].get("ts", 0.0)))[0]
+            logger.debug("Cache full. Removing oldest key: %s", oldest_key)
             self._query_result_cache.pop(oldest_key, None)
         self._query_result_cache[cache_key] = {
             "ts": time.time(),
@@ -126,6 +137,7 @@ class RetrievalPipeline:
                 "source_documents": [dict(doc) for doc in result.get("source_documents", [])],
             },
         }
+        logger.debug("Stored result in cache for key: %s", cache_key)
 
     def _get_text_table_name(self) -> str:
         return self.storage_config.get("text_table_name") or self.config["storage"].get("text_table_name")
@@ -391,9 +403,8 @@ Instructions
 3. If snippets contradict one another, mention the contradiction explicitly.
 4. If the snippets do not contain the needed information, reply exactly with:
     "I could not find that information in the provided documents."
-5. Every substantive claim must include at least one citation tag in the form `[S#]` where `#` maps to the Retrieved Snippet number.
-6. Keep citations precise: do not cite snippets that do not support the claim.
-7. Do **not** introduce external knowledge unless step 4 applies; in that case you may add one clearly-labelled "General knowledge" sentence after the required statement.
+5. Keep citations precise: do not cite snippets that do not support the claim.
+6. Do **not** introduce external knowledge unless step 4 applies; in that case you may add one clearly-labelled "General knowledge" sentence after the required statement.
 
 Output format
 Return only the answer text as plain prose.
@@ -870,16 +881,21 @@ ORIGINAL QUESTION: "{query}"
             return []
 
     # -------------------- Public helper properties --------------------
+
     @property
-    def retriever(self):
-        """Lazily exposes the main (dense) retriever so external components
-        like the ReAct agent tools can call `.retrieve()` directly without
-        reaching into private helpers. If the retriever has not yet been
-        instantiated, it is created on first access via `_get_dense_retriever`."""
+    def retriever(self) -> Optional[Any]:
+        """
+        Lazily exposes the main (dense) retriever so external components
+        can call `.retrieve()` directly. Instantiates on first access.
+        """
         return self._get_dense_retriever()
 
-    def update_embedding_model(self, model_name: str):
-        """Switch embedding model at runtime and clear cached objects so they re-initialize."""
+
+    def update_embedding_model(self, model_name: str) -> None:
+        """
+        Switch embedding model at runtime and clear cached objects so they re-initialize.
+        Optimized for efficiency: avoids unnecessary reloads.
+        """
         if self.config.get("embedding_model_name") == model_name:
             return  # nothing to do
         print(f" RetrievalPipeline switching embedding model to '{model_name}' (was '{self.config.get('embedding_model_name')}')")

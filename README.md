@@ -302,7 +302,7 @@ curl -X POST http://localhost:8000/sessions \
   -d '{
     "title": "High Quality Session",
     "model": "gemma3:12b-cloud",
-    "embedding_model": "nomic-embed-text:v1.5:latest"
+    "embedding_model": "nomic-embed-text:v1.5"
   }'
 ```
 

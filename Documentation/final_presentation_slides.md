@@ -209,22 +209,26 @@ Clarify that these are engineering benchmarks from the project documentation, no
 ---
 
 ## Slide 12 - Educational Relevance
-**Why this matters for education**
 
-- Supports secure access to institutional knowledge
-- Useful for administration, curriculum work, research support, and policy lookup
-- Reduces dependence on external AI services
-- Demonstrates responsible AI deployment in education
+**Why this matters for education in Cambodia**
 
-**Possible use cases**
+- Enables secure, private access to institutional knowledge for universities and ministries
+- Supports daily tasks in administration, curriculum development, research, and policy lookup
+- Reduces reliance on external AI services, protecting sensitive data and complying with local privacy needs
+- Demonstrates responsible, locally controlled AI deployment in education
 
-- Querying academic regulations
-- Summarizing project reports
-- Searching research papers
-- Accessing internal administrative guidance
+**Example scenario:**
+
+- A university staff member quickly finds the latest academic regulation or policy without reading hundreds of pages
+
+**Other use cases:**
+
+- Summarizing project reports for faculty
+- Searching research papers for students
+- Accessing internal administrative guidance for staff
 
 **Speaker note:**
-Connect the technical system back to the degree field: Information Technology in Education.
+Emphasize the system's direct relevance to Cambodian education and information technology. Show how it addresses real institutional needs and supports responsible AI adoption.
 
 ---
 

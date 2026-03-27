@@ -185,16 +185,39 @@ class OllamaClient:
         )
 
     def generate_embedding(self, model: str, text: str) -> List[float]:
+        import logging
+        logger = logging.getLogger("academicrag.ollama_client")
+        payload = {"model": model, "prompt": text}
+        logger.debug(f"[Ollama] Embedding request payload: {payload}")
         try:
-            response = self._request_with_resilience(
-                "POST",
-                "embeddings",
-                json={"model": model, "prompt": text}
-            )
-            response.raise_for_status()
-            return response.json().get("embedding", [])
+            # Try /api/embeddings endpoint first
+            try:
+                logger.debug("[Ollama] Trying /api/embeddings endpoint")
+                response = self._request_with_resilience(
+                    "POST",
+                    "embeddings",
+                    json=payload
+                )
+                response.raise_for_status()
+                logger.debug(f"[Ollama] /api/embeddings response: {response.text[:300]}")
+                return response.json().get("embedding", [])
+            except Exception as emb_err:
+                logger.warning(f"[Ollama] /api/embeddings failed: {emb_err}. Trying /api/generate fallback.")
+                # Fallback to /api/generate if /api/embeddings fails
+                response = self._request_with_resilience(
+                    "POST",
+                    "generate",
+                    json=payload
+                )
+                response.raise_for_status()
+                logger.debug(f"[Ollama] /api/generate response: {response.text[:300]}")
+                data = response.json()
+                # Some models return embedding in 'embedding', others in 'response' or similar
+                embedding = data.get("embedding") or data.get("response") or []
+                logger.debug(f"[Ollama] Parsed embedding: {str(embedding)[:300]}")
+                return embedding
         except Exception as e:
-            print(f"Error generating embedding: {e}")
+            logger.error(f"Error generating embedding: {e}")
             return []
 
     def generate_completion(

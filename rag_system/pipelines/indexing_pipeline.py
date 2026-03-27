@@ -35,7 +35,7 @@ class IndexingPipeline:
                 self.chunker = DoclingChunker(
                     max_tokens=config.get("max_tokens", chunk_size),
                     overlap=config.get("overlap_sentences", 1),
-                    tokenizer_model=config.get("embedding_model_name", "nomic-embed-text:v1.5"),
+                    tokenizer_model=config.get("embedding_model_name", "nomic-embed-text:v1.5 "),
                 )
                 print(" Using DoclingChunker for high-recall sentence packing.")
             except Exception as e:

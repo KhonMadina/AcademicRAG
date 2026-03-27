@@ -125,28 +125,31 @@ def _fuse_ranked_results(
 class GraphRetriever:
     def __init__(self, graph_path: str):
         self.graph = nx.read_gml(graph_path)
+        self.logger = logging.getLogger(__name__)
 
     def retrieve(self, query: str, k: int = 5, score_cutoff: int = 80) -> List[Dict[str, Any]]:
-        print(f"\n--- Performing Graph Retrieval for query: '{query}' ---")
-        
+        self.logger.debug("Performing Graph Retrieval for query: '%s'", query)
         query_parts = query.split()
-        entities = []
+        # Use set for deduplication and efficiency
+        entities = set()
+        nodes = list(self.graph.nodes())
         for part in query_parts:
-            match = process.extractOne(part, self.graph.nodes(), score_cutoff=score_cutoff)
+            match = process.extractOne(part, nodes, score_cutoff=score_cutoff)
             if match and isinstance(match[0], str):
-                entities.append(match[0])
-        
-        retrieved_docs = []
-        for entity in set(entities):
-            for neighbor in self.graph.neighbors(entity):
-                retrieved_docs.append({
-                    'chunk_id': f"graph_{entity}_{neighbor}",
-                    'text': f"Entity: {entity}, Neighbor: {neighbor}",
-                    'score': 1.0,
-                    'metadata': {'source': 'graph'}
-                })
-        
-        print(f"Retrieved {len(retrieved_docs)} documents from the graph.")
+                entities.add(match[0])
+
+        retrieved_docs = [
+            {
+                'chunk_id': f"graph_{entity}_{neighbor}",
+                'text': f"Entity: {entity}, Neighbor: {neighbor}",
+                'score': 1.0,
+                'metadata': {'source': 'graph'}
+            }
+            for entity in entities
+            for neighbor in self.graph.neighbors(entity)
+        ]
+
+        self.logger.debug("GraphRetriever: Retrieved %d documents from the graph.", len(retrieved_docs))
         return retrieved_docs[:k]
 
 # region === MultiVectorRetriever ===
@@ -167,23 +170,28 @@ class MultiVectorRetriever:
 
         self._embed_single = _embed_single
 
-    def retrieve(self, text_query: str, table_name: str, k: int, reranker=None, search_type: str | None = None) -> List[Dict[str, Any]]:
+    def retrieve(
+        self,
+        text_query: str,
+        table_name: str,
+        k: int,
+        reranker=None,
+        search_type: str | None = None
+    ) -> List[Dict[str, Any]]:
         """
         Performs a search on a single LanceDB table.
         If a reranker is provided, it performs a hybrid search.
         Otherwise, it performs a standard vector search.
         """
-        print(f"\n--- Performing Retrieval for query: '{text_query}' on table '{table_name}' ---")
-        
         try:
+            logger = logging.getLogger(__name__)
             if table_name is None:
                 table_name = "default_text_table"
             tbl = self.db_manager.get_table(table_name)
-            
+
             # Create / fetch cached text embedding for the query
             text_query_embedding = self._embed_single(text_query)
-            
-            logger = logging.getLogger(__name__)
+
             search_mode = (search_type or self.fusion_config.get("search_type", "hybrid") or "hybrid").lower()
             method = str(self.fusion_config.get("method", "rrf") or "rrf").lower()
             candidate_multiplier = max(1, int(self.fusion_config.get("candidate_multiplier", 2)))
@@ -214,30 +222,29 @@ class MultiVectorRetriever:
             do_vec = search_mode in {"hybrid", "vector", "vector_only", "dense"}
 
             # Run FTS and vector search in parallel to cut latency
-            def _run_fts():
+            def _run_fts() -> pd.DataFrame:
                 if not do_fts:
                     return pd.DataFrame()
-                # Very short queries often underperform  add fuzzy wildcard
                 fts_query = text_query
                 if len(text_query.split()) == 1:
                     fts_query = f"{text_query}* OR {text_query}~"
                 try:
                     return (
-                         tbl.search(query=fts_query, query_type="fts")
-                            .limit(candidate_k)
-                            .to_df()
-                     )
+                        tbl.search(query=fts_query, query_type="fts")
+                        .limit(candidate_k)
+                        .to_df()
+                    )
                 except Exception as e:
                     logger.warning("FTS leg failed on table '%s': %s", table_name, e)
                     return pd.DataFrame()
 
-            def _run_vec():
+            def _run_vec() -> pd.DataFrame:
                 if not do_vec:
                     return pd.DataFrame()
                 return (
                     tbl.search(text_query_embedding)
-                       .limit(candidate_k)
-                       .to_df()
+                    .limit(candidate_k)
+                    .to_df()
                 )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -265,12 +272,12 @@ class MultiVectorRetriever:
 
             ranked_records = ranked_records[:k]
             logger.debug(
-                "Retrieval complete (fts=%s, vec=%s)  %s final chunks",
+                "Retrieval complete (fts=%d, vec=%d)  %d final chunks",
                 len(fts_records),
                 len(vec_records),
                 len(ranked_records),
             )
-            
+
             retrieved_docs = []
             for row in ranked_records:
                 metadata = _parse_metadata_payload(row.get('metadata'))
@@ -278,7 +285,7 @@ class MultiVectorRetriever:
                 metadata.setdefault('document_id', row.get('document_id'))
                 metadata.setdefault('chunk_index', row.get('chunk_index'))
                 metadata.setdefault('chunk_id', row.get('chunk_id'))
-                
+
                 # Determine score (vector distance or FTS). Replace NaN with 0.0
                 raw_score = row.get('_distance') if '_distance' in row else row.get('score')
                 combined_score = row.get('_fused_score')
@@ -296,13 +303,12 @@ class MultiVectorRetriever:
                     'metadata': metadata
                 })
 
-            logger.debug("Hybrid search returned %s results", len(retrieved_docs))
+            logger.debug("Hybrid search returned %d results", len(retrieved_docs))
             log_retrieval_results(retrieved_docs, k)
-            print(f"Retrieved {len(retrieved_docs)} documents.")
             return retrieved_docs
-        
+
         except Exception as e:
-            print(f"Could not search table '{table_name}': {e}")
+            logging.getLogger(__name__).error("Could not search table '%s': %s", table_name, e)
             return []
 # endregion
 
